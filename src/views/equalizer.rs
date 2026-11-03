@@ -174,9 +174,7 @@ fn modal_header(is_light: bool, cx: &mut Context<NoirPlayerModel>) -> Div {
                             cx.stop_propagation();
                             this.store.equalizer_preset = "Flat".to_string();
                             this.store.equalizer_gains = [0.0; 5];
-                            if let Some(p) = this.player.as_ref() {
-                                p.set_equalizer_gains([0.0; 5]);
-                            }
+                            this.player.set_equalizer_gains([0.0; 5]);
                             this.save_current_store(cx);
                         }))
                         .child("Reset Flat"),
@@ -289,9 +287,7 @@ fn master_toggle_section(enabled: bool, is_light: bool, cx: &mut Context<NoirPla
                     cx.stop_propagation();
                     let next = !this.store.equalizer_enabled;
                     this.store.equalizer_enabled = next;
-                    if let Some(p) = this.player.as_ref() {
-                        p.set_equalizer_enabled(next);
-                    }
+                    this.player.set_equalizer_enabled(next);
                     this.save_current_store(cx);
                 }))
                 .child(
@@ -389,10 +385,8 @@ fn presets_section(current: &str, is_light: bool, cx: &mut Context<NoirPlayerMod
                             this.store.equalizer_preset = name.to_string();
                             this.store.equalizer_gains = gains;
                             this.store.equalizer_enabled = true;
-                            if let Some(p) = this.player.as_ref() {
-                                p.set_equalizer_enabled(true);
-                                p.set_equalizer_gains(gains);
-                            }
+                            this.player.set_equalizer_enabled(true);
+                            this.player.set_equalizer_gains(gains);
                             this.save_current_store(cx);
                         }))
                         .child(name)
@@ -530,9 +524,7 @@ fn bands_section(
                                             g[bi] = (g[bi] - 1.0).max(-12.0);
                                             this.store.equalizer_gains = g;
                                             this.store.equalizer_preset = "Custom".into();
-                                            if let Some(p) = this.player.as_ref() {
-                                                p.set_equalizer_gains(g);
-                                            }
+                                            this.player.set_equalizer_gains(g);
                                             this.save_current_store(cx);
                                         }))
                                         .child("\u{2212}"),
@@ -553,9 +545,7 @@ fn bands_section(
                                             g[bi] = (g[bi] + 1.0).min(12.0);
                                             this.store.equalizer_gains = g;
                                             this.store.equalizer_preset = "Custom".into();
-                                            if let Some(p) = this.player.as_ref() {
-                                                p.set_equalizer_gains(g);
-                                            }
+                                            this.player.set_equalizer_gains(g);
                                             this.save_current_store(cx);
                                         }))
                                         .child("+"),

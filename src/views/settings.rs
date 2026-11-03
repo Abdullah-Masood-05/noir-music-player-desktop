@@ -347,9 +347,7 @@ fn build_rows(
                     |this, _, _, cx| {
                         let next = !this.store.equalizer_enabled;
                         this.store.equalizer_enabled = next;
-                        if let Some(p) = this.player.as_ref() {
-                            p.set_equalizer_enabled(next);
-                        }
+                        this.player.set_equalizer_enabled(next);
                         this.save_current_store(cx);
                     },
                 ))

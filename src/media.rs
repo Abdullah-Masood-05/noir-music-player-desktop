@@ -1,10 +1,11 @@
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use image::{ImageDecoder, ImageEncoder};
@@ -13,7 +14,9 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::PictureType;
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
+use rodio::cpal::{self, traits::HostTrait};
+use rodio::mixer::Mixer;
+use rodio::{Decoder, DeviceTrait, OutputStream, OutputStreamBuilder, Sink, Source};
 use walkdir::WalkDir;
 
 #[derive(Clone, Debug)]
@@ -1241,33 +1244,436 @@ where
     }
 }
 
-pub struct MediaPlayer {
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(1750);
+/// Bluetooth devices can take seconds to start pulling audio after opening.
+const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(5);
+const DEFAULT_DEVICE_POLL: Duration = Duration::from_secs(1);
+const OUTPUT_RETRY: Duration = Duration::from_millis(1500);
+const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(20);
+/// An open that takes longer than this is abandoned to its thread and retried.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_OPEN_WAIT: Duration = Duration::from_secs(2);
+/// How long a new stream waits for the previous one to let go of the device.
+const RELEASE_WAIT: Duration = Duration::from_secs(1);
+/// A failed seek this close to the end is treated as reaching the end.
+const END_SLACK: Duration = Duration::from_secs(1);
+const HEARTBEAT_STRIDE: u32 = 256;
+
+/// Silent source whose counter shows the UI thread that the audio callback still runs.
+struct Heartbeat {
+    beats: Arc<AtomicU64>,
+    channels: u16,
+    sample_rate: u32,
+    samples: u32,
+}
+
+impl Iterator for Heartbeat {
+    type Item = f32;
+
+    #[inline]
+    fn next(&mut self) -> Option<f32> {
+        self.samples += 1;
+        if self.samples >= HEARTBEAT_STRIDE {
+            self.samples = 0;
+            self.beats.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(0.0)
+    }
+}
+
+impl Source for Heartbeat {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeartbeatWatch {
+    seen: u64,
+    changed_at: Instant,
+}
+
+impl HeartbeatWatch {
+    fn new(now: Instant) -> Self {
+        Self {
+            seen: 0,
+            changed_at: now,
+        }
+    }
+
+    fn observe(&mut self, beats: u64, now: Instant) -> Duration {
+        if beats != self.seen {
+            self.seen = beats;
+            self.changed_at = now;
+        }
+        now.saturating_duration_since(self.changed_at)
+    }
+
+    fn has_beaten(&self) -> bool {
+        self.seen != 0
+    }
+}
+
+fn should_rebuild(
+    failed: bool,
+    heartbeat_age: Duration,
+    has_beaten: bool,
+    default_changed: bool,
+) -> bool {
+    let timeout = if has_beaten {
+        HEARTBEAT_TIMEOUT
+    } else {
+        HEARTBEAT_STARTUP_GRACE
+    };
+    failed || heartbeat_age >= timeout || default_changed
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Throttle {
+    base: Duration,
+    interval: Duration,
+    last: Option<Instant>,
+}
+
+impl Throttle {
+    fn new(interval: Duration) -> Self {
+        Self {
+            base: interval,
+            interval,
+            last: None,
+        }
+    }
+
+    fn ready(&mut self, now: Instant) -> bool {
+        if self.last.is_some_and(|last| now < last + self.interval) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+
+    fn back_off(&mut self, max: Duration) {
+        self.interval = self.interval.saturating_mul(2).min(max);
+    }
+
+    fn reset(&mut self) {
+        self.interval = self.base;
+    }
+}
+
+fn playback_position(start: Duration, played: Duration, duration: Option<Duration>) -> Duration {
+    let position = start.saturating_add(played);
+    duration.map_or(position, |duration| position.min(duration))
+}
+
+/// `None` when the name could not be read, `Some(None)` when there is no output device.
+fn default_output_name() -> Option<Option<String>> {
+    // cpal's WASAPI `name()` panics when a device's property store can't be opened.
+    crate::crash::catch_quietly(|| match cpal::default_host().default_output_device() {
+        Some(device) => device.name().ok().map(Some),
+        None => Some(None),
+    })
+    .flatten()
+}
+
+/// What the stream thread hands back; the `OutputStream` itself never leaves that thread.
+struct Opened {
+    mixer: Mixer,
+    /// The default output device when this stream was opened.
+    device_name: Option<String>,
+    on_default: bool,
+    failed: Arc<AtomicBool>,
+    beats: Arc<AtomicU64>,
+    keep_alive: mpsc::Sender<()>,
+    released: mpsc::Receiver<()>,
+}
+
+/// Opens and later closes a stream on its own thread, so a hung driver can't freeze the UI.
+fn spawn_output(previous: Option<mpsc::Receiver<()>>) -> mpsc::Receiver<Option<Opened>> {
+    let (sender, receiver) = mpsc::channel();
+    // A failed spawn drops `sender`, which reads as a failed open.
+    let _ = std::thread::Builder::new()
+        .name("audio-output".into())
+        .spawn(move || {
+            if let Some(previous) = previous {
+                let _ = previous.recv_timeout(RELEASE_WAIT);
+            }
+            let failed = Arc::new(AtomicBool::new(false));
+            let Some((mut stream, device_name, on_default)) =
+                crate::crash::catch_quietly(|| open_stream(&failed)).flatten()
+            else {
+                let _ = sender.send(None);
+                return;
+            };
+            stream.log_on_drop(false);
+            let beats = Arc::new(AtomicU64::new(0));
+            let config = *stream.config();
+            stream.mixer().add(Heartbeat {
+                beats: beats.clone(),
+                channels: config.channel_count(),
+                sample_rate: config.sample_rate(),
+                samples: 0,
+            });
+            let (keep_alive, kept) = mpsc::channel();
+            let (released_sender, released) = mpsc::channel();
+            let opened = Opened {
+                mixer: stream.mixer().clone(),
+                device_name,
+                on_default,
+                failed,
+                beats,
+                keep_alive,
+                released,
+            };
+            if sender.send(Some(opened)).is_ok() {
+                let _ = kept.recv();
+            }
+            drop(stream);
+            drop(released_sender);
+        });
+    receiver
+}
+
+fn open_stream(failed: &Arc<AtomicBool>) -> Option<(OutputStream, Option<String>, bool)> {
+    let on_error = {
+        let failed = failed.clone();
+        // Runs on the audio thread; only a flag, the UI thread does the rest.
+        move |error: cpal::StreamError| {
+            if matches!(error, cpal::StreamError::DeviceNotAvailable) {
+                failed.store(true, Ordering::Relaxed);
+            }
+        }
+    };
+    let open = |device: cpal::Device| {
+        OutputStreamBuilder::from_device(device)
+            .ok()?
+            .with_error_callback(on_error.clone())
+            .open_stream_or_fallback()
+            .ok()
+    };
+    let host = cpal::default_host();
+    let default = host.default_output_device();
+    // A panic here only loses the name, which turns off default-change detection.
+    let device_name = default
+        .as_ref()
+        .and_then(|device| crate::crash::catch_quietly(|| device.name().ok()).flatten());
+    if let Some(stream) = default.and_then(open) {
+        return Some((stream, device_name, true));
+    }
+    let stream = host.output_devices().ok()?.find_map(open)?;
+    Some((stream, device_name, false))
+}
+
+struct Output {
+    mixer: Mixer,
     sink: Sink,
-    stream: OutputStream,
+    device_name: Option<String>,
+    on_default: bool,
+    failed: Arc<AtomicBool>,
+    beats: Arc<AtomicU64>,
+    watch: HeartbeatWatch,
+    _keep_alive: mpsc::Sender<()>,
+    released: mpsc::Receiver<()>,
+}
+
+impl Output {
+    fn new(opened: Opened, now: Instant) -> Self {
+        let sink = Sink::connect_new(&opened.mixer);
+        sink.pause();
+        Self {
+            mixer: opened.mixer,
+            sink,
+            device_name: opened.device_name,
+            on_default: opened.on_default,
+            failed: opened.failed,
+            beats: opened.beats,
+            watch: HeartbeatWatch::new(now),
+            _keep_alive: opened.keep_alive,
+            released: opened.released,
+        }
+    }
+
+    /// Lets the stream thread close the device; the receiver disconnects once it has.
+    fn release(self) -> mpsc::Receiver<()> {
+        self.released
+    }
+}
+
+struct PendingOutput {
+    opened: mpsc::Receiver<Option<Opened>>,
+    started: Instant,
+    /// Replacing a working output, so the UI need not report it as missing yet.
+    replacing: bool,
+}
+
+/// Decodes `path` positioned at `at`; no decoder means `at` is the end of the track.
+fn decode_at(
+    path: &Path,
+    at: Duration,
     duration: Option<Duration>,
-    loaded: bool,
+) -> Result<(Option<Decoder<BufReader<File>>>, Duration)> {
+    let mut decoder = decode_file(path)?;
+    if at.is_zero() {
+        return Ok((Some(decoder), at));
+    }
+    match decoder.try_seek(at) {
+        Ok(()) => Ok((Some(decoder), at)),
+        // Demuxers reject a seek at or past the last sample rather than ending.
+        Err(_) if duration.is_some_and(|duration| at.saturating_add(END_SLACK) >= duration) => {
+            Ok((None, at))
+        }
+        Err(error) => Err(anyhow!("{}: failed to seek: {error}", path.display())),
+    }
+}
+
+/// Playback state lives here, not in the `Sink`, so it survives the output being rebuilt.
+pub struct MediaPlayer {
+    output: Option<Output>,
+    pending: Option<PendingOutput>,
+    path: Option<PathBuf>,
+    duration: Option<Duration>,
+    volume: Cell<f32>,
+    want_playing: Cell<bool>,
+    /// Where the current source was seeked to; rodio counts from there.
+    start: Duration,
+    last_position: Duration,
+    retry: Throttle,
+    device_poll: Throttle,
     pub eq_state: Arc<std::sync::RwLock<EqualizerState>>,
     eq_shared: Arc<EqualizerShared>,
     meter: LevelMeter,
 }
 
 impl MediaPlayer {
-    pub fn new() -> Result<Self> {
-        let stream = OutputStreamBuilder::open_default_stream()
-            .context("Failed to open an audio output device")?;
-        let sink = Sink::connect_new(stream.mixer());
-        sink.pause();
-        let eq_state = Arc::new(std::sync::RwLock::new(EqualizerState::default()));
-        let eq_shared = Arc::new(EqualizerShared::new(false, [0.0; 5]));
-        Ok(Self {
-            sink,
-            stream,
+    pub fn new() -> Self {
+        let mut player = Self::with_output(None);
+        let opened = spawn_output(None);
+        match opened.recv_timeout(STARTUP_OPEN_WAIT) {
+            Ok(Some(opened)) => player.output = Some(Output::new(opened, Instant::now())),
+            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                player.pending = Some(PendingOutput {
+                    opened,
+                    started: Instant::now(),
+                    replacing: false,
+                });
+            }
+        }
+        player
+    }
+
+    fn with_output(output: Option<Output>) -> Self {
+        let now = Instant::now();
+        let mut retry = Throttle::new(OUTPUT_RETRY);
+        retry.ready(now);
+        let mut device_poll = Throttle::new(DEFAULT_DEVICE_POLL);
+        device_poll.ready(now);
+        Self {
+            output,
+            pending: None,
+            path: None,
             duration: None,
-            loaded: false,
-            eq_state,
-            eq_shared,
+            volume: Cell::new(1.0),
+            want_playing: Cell::new(false),
+            start: Duration::ZERO,
+            last_position: Duration::ZERO,
+            retry,
+            device_poll,
+            eq_state: Arc::new(std::sync::RwLock::new(EqualizerState::default())),
+            eq_shared: Arc::new(EqualizerShared::new(false, [0.0; 5])),
             meter: LevelMeter::default(),
-        })
+        }
+    }
+
+    pub fn has_output(&self) -> bool {
+        self.output.is_some()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.replacing)
+    }
+
+    fn start_open(&mut self, previous: Option<mpsc::Receiver<()>>, now: Instant) {
+        self.pending = Some(PendingOutput {
+            replacing: previous.is_some(),
+            opened: spawn_output(previous),
+            started: now,
+        });
+    }
+
+    /// Reopens a lost, stalled or no-longer-default output; true when the output changed.
+    pub fn poll(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(pending) = &self.pending {
+            let opened = match pending.opened.try_recv() {
+                Ok(opened) => opened,
+                Err(mpsc::TryRecvError::Empty)
+                    if now.saturating_duration_since(pending.started) < OPEN_TIMEOUT =>
+                {
+                    return false;
+                }
+                Err(_) => None,
+            };
+            self.pending = None;
+            let Some(opened) = opened else {
+                self.retry.back_off(OUTPUT_RETRY_MAX);
+                return true;
+            };
+            self.output = Some(Output::new(opened, now));
+            self.restore();
+            return true;
+        }
+        let health = self.output.as_mut().map(|output| {
+            let age = output
+                .watch
+                .observe(output.beats.load(Ordering::Relaxed), now);
+            (
+                output.failed.load(Ordering::Relaxed),
+                age,
+                output.watch.has_beaten(),
+                output.device_name.clone(),
+                // CoreAudio's default-output unit already follows the system default.
+                cfg!(target_os = "macos") && output.on_default,
+            )
+        });
+        let Some((failed, age, has_beaten, opened_default, follows_default)) = health else {
+            if self.retry.ready(now) {
+                self.start_open(None, now);
+            }
+            return false;
+        };
+        let healthy = !should_rebuild(failed, age, has_beaten, false);
+        if healthy {
+            self.last_position = self.position();
+            if has_beaten {
+                self.retry.reset();
+            }
+        }
+        let default_changed = healthy
+            && !follows_default
+            && self.device_poll.ready(now)
+            && default_output_name().is_some_and(|name| name != opened_default);
+        if !should_rebuild(failed, age, has_beaten, default_changed) || !self.retry.ready(now) {
+            return false;
+        }
+        if !has_beaten {
+            self.retry.back_off(OUTPUT_RETRY_MAX);
+        }
+        let released = self.output.take().map(Output::release);
+        self.start_open(released, now);
+        true
     }
 
     fn publish_equalizer(&self) {
@@ -1277,6 +1683,42 @@ impl MediaPlayer {
             .map(|state| (state.enabled, state.gains))
             .unwrap_or((false, [0.0; 5]));
         self.eq_shared.store(enabled, gains);
+    }
+
+    /// A fresh sink never waits on the audio thread, unlike seeking or clearing a dead one.
+    fn replace_sink(&mut self, decoder: Option<Decoder<BufReader<File>>>) {
+        let Some(output) = self.output.as_mut() else {
+            return;
+        };
+        let sink = Sink::connect_new(&output.mixer);
+        sink.pause();
+        sink.set_volume(self.volume.get());
+        if let Some(decoder) = decoder {
+            sink.append(EqualizerSource::new(
+                decoder,
+                self.eq_shared.clone(),
+                self.meter.clone(),
+            ));
+        }
+        if self.want_playing.get() {
+            sink.play();
+        }
+        output.sink.stop();
+        output.sink = sink;
+    }
+
+    /// Puts the current track back at its last position on a new output.
+    fn restore(&mut self) {
+        let at = self.last_position;
+        let (decoder, start) = match self.path.clone() {
+            Some(path) => decode_at(&path, at, self.duration)
+                .or_else(|_| decode_file(&path).map(|decoder| (Some(decoder), Duration::ZERO)))
+                .unwrap_or((None, at)),
+            None => (None, Duration::ZERO),
+        };
+        self.start = start;
+        self.last_position = start;
+        self.replace_sink(decoder);
     }
 
     pub fn load(&mut self, path: &Path) -> Result<()> {
@@ -1290,15 +1732,12 @@ impl MediaPlayer {
                     .map(|tagged| tagged.properties().duration())
                     .filter(|duration| !duration.is_zero())
             });
-        let sink = Sink::connect_new(self.stream.mixer());
-        sink.pause();
-        sink.set_volume(self.sink.volume());
-        let eq_source = EqualizerSource::new(decoder, self.eq_shared.clone(), self.meter.clone());
-        sink.append(eq_source);
-        self.sink.stop();
-        self.sink = sink;
+        self.path = Some(path.to_path_buf());
         self.duration = duration;
-        self.loaded = true;
+        self.want_playing.set(false);
+        self.start = Duration::ZERO;
+        self.last_position = Duration::ZERO;
+        self.replace_sink(Some(decoder));
         Ok(())
     }
 
@@ -1308,23 +1747,33 @@ impl MediaPlayer {
     }
 
     pub fn play(&self) {
-        self.sink.play();
+        self.want_playing.set(true);
+        if let Some(output) = &self.output {
+            output.sink.play();
+        }
     }
 
     pub fn pause(&self) {
-        self.sink.pause();
+        self.want_playing.set(false);
+        if let Some(output) = &self.output {
+            output.sink.pause();
+        }
     }
 
     #[allow(dead_code)]
     pub fn is_paused(&self) -> bool {
-        self.sink.is_paused()
+        !self.want_playing.get()
     }
 
     pub fn position(&self) -> Duration {
         if self.is_finished() {
-            self.duration.unwrap_or_else(|| self.sink.get_pos())
-        } else {
-            self.sink.get_pos()
+            return self.duration.unwrap_or(self.last_position);
+        }
+        match &self.output {
+            Some(output) if self.path.is_some() => {
+                playback_position(self.start, output.sink.get_pos(), self.duration)
+            }
+            _ => self.last_position,
         }
     }
 
@@ -1333,38 +1782,41 @@ impl MediaPlayer {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.loaded && self.sink.empty()
+        self.path.is_some()
+            && self
+                .output
+                .as_ref()
+                .is_some_and(|output| output.sink.empty())
     }
 
-    #[allow(dead_code)]
-    pub fn seek(&self, position: Duration) -> Result<()> {
-        if !self.loaded || self.sink.empty() {
+    /// Seeks a fresh decoder, since `Sink::try_seek` blocks forever on a dead stream.
+    pub fn seek(&mut self, position: Duration) -> Result<()> {
+        let Some(path) = self.path.clone() else {
             bail!("No active track to seek; load a track first");
-        }
+        };
         let position = self
             .duration
             .map_or(position, |duration| position.min(duration));
-        self.sink
-            .try_seek(position)
-            .map_err(|error| anyhow!("Failed to seek audio: {error}"))
+        if self.output.is_none() {
+            self.last_position = position;
+            return Ok(());
+        }
+        let (decoder, start) = decode_at(&path, position, self.duration)?;
+        self.start = start;
+        self.last_position = start;
+        self.replace_sink(decoder);
+        Ok(())
     }
 
-    pub fn skip_forward(&self, offset: Duration) -> Result<()> {
-        if !self.loaded || self.sink.empty() {
-            bail!("No active track to seek; load a track first");
-        }
+    pub fn skip_forward(&mut self, offset: Duration) -> Result<()> {
         let current = self.position();
         let duration = self.duration.unwrap_or(current + offset);
         let target = (current + offset).min(duration);
         self.seek(target)
     }
 
-    pub fn skip_backward(&self, offset: Duration) -> Result<()> {
-        if !self.loaded || self.sink.empty() {
-            bail!("No active track to seek; load a track first");
-        }
-        let current = self.position();
-        let target = current.saturating_sub(offset);
+    pub fn skip_backward(&mut self, offset: Duration) -> Result<()> {
+        let target = self.position().saturating_sub(offset);
         self.seek(target)
     }
 
@@ -1409,24 +1861,26 @@ impl MediaPlayer {
 
     #[allow(dead_code)]
     pub fn volume(&self) -> f32 {
-        self.sink.volume()
+        self.volume.get()
     }
 
     pub fn set_volume(&self, volume: f32) {
         if volume.is_finite() {
-            self.sink.set_volume(volume.clamp(0.0, 1.0));
+            let volume = volume.clamp(0.0, 1.0);
+            self.volume.set(volume);
+            if let Some(output) = &self.output {
+                output.sink.set_volume(volume);
+            }
         }
     }
 
-    #[allow(dead_code)]
     pub fn stop(&mut self) {
-        let volume = self.sink.volume();
-        self.sink.stop();
-        self.sink = Sink::connect_new(self.stream.mixer());
-        self.sink.set_volume(volume);
-        self.sink.pause();
+        self.path = None;
         self.duration = None;
-        self.loaded = false;
+        self.want_playing.set(false);
+        self.start = Duration::ZERO;
+        self.last_position = Duration::ZERO;
+        self.replace_sink(None);
     }
 }
 
@@ -1958,5 +2412,158 @@ mod tests {
             added: None,
             search_key: Track::build_search_key("", "", ""),
         }
+    }
+
+    #[test]
+    fn heartbeat_source_is_silent_and_beats_every_stride() {
+        let beats = Arc::new(AtomicU64::new(0));
+        let mut heartbeat = Heartbeat {
+            beats: beats.clone(),
+            channels: 2,
+            sample_rate: 48_000,
+            samples: 0,
+        };
+        let stride = HEARTBEAT_STRIDE as usize;
+        assert!((0..stride * 3).all(|_| heartbeat.next() == Some(0.0)));
+        assert_eq!(beats.load(Ordering::Relaxed), 3);
+        assert_eq!(heartbeat.total_duration(), None);
+    }
+
+    #[test]
+    fn heartbeat_age_resets_whenever_the_count_moves() {
+        let start = Instant::now();
+        let mut watch = HeartbeatWatch::new(start);
+        assert!(!watch.has_beaten());
+        assert_eq!(
+            watch.observe(0, start + Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            watch.observe(4, start + Duration::from_secs(2)),
+            Duration::ZERO
+        );
+        assert!(watch.has_beaten());
+        assert_eq!(
+            watch.observe(4, start + Duration::from_secs(5)),
+            Duration::from_secs(3)
+        );
+        // A UI stall is not a dead stream: the count moved in the meantime.
+        assert_eq!(
+            watch.observe(9, start + Duration::from_secs(30)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn rebuild_on_error_stale_heartbeat_or_new_default_device() {
+        let fresh = Duration::from_millis(200);
+        assert!(!should_rebuild(false, fresh, true, false));
+        assert!(should_rebuild(true, fresh, true, false));
+        assert!(should_rebuild(false, fresh, true, true));
+        assert!(should_rebuild(false, HEARTBEAT_TIMEOUT, true, false));
+        assert!(!should_rebuild(
+            false,
+            HEARTBEAT_TIMEOUT - Duration::from_millis(1),
+            true,
+            false
+        ));
+        // A stream still starting up gets the longer grace period.
+        assert!(!should_rebuild(false, HEARTBEAT_TIMEOUT, false, false));
+        assert!(should_rebuild(false, HEARTBEAT_STARTUP_GRACE, false, false));
+    }
+
+    #[test]
+    fn throttle_allows_one_attempt_per_interval() {
+        let start = Instant::now();
+        let mut throttle = Throttle::new(OUTPUT_RETRY);
+        assert!(throttle.ready(start));
+        assert!(!throttle.ready(start));
+        assert!(!throttle.ready(start + OUTPUT_RETRY - Duration::from_millis(1)));
+        assert!(throttle.ready(start + OUTPUT_RETRY));
+        assert!(!throttle.ready(start + OUTPUT_RETRY + Duration::from_millis(250)));
+        // Polled every 250 ms for 15 s, it lets through one attempt per interval.
+        let mut throttle = Throttle::new(OUTPUT_RETRY);
+        let attempts = (0..60)
+            .filter(|tick| throttle.ready(start + Duration::from_millis(250) * *tick))
+            .count();
+        assert_eq!(attempts, 10);
+    }
+
+    #[test]
+    fn failed_opens_back_off_until_capped_and_reset_on_success() {
+        let start = Instant::now();
+        let mut throttle = Throttle::new(OUTPUT_RETRY);
+        assert!(throttle.ready(start));
+        throttle.back_off(OUTPUT_RETRY_MAX);
+        assert!(!throttle.ready(start + OUTPUT_RETRY));
+        assert!(throttle.ready(start + OUTPUT_RETRY * 2));
+        for _ in 0..10 {
+            throttle.back_off(OUTPUT_RETRY_MAX);
+        }
+        assert_eq!(throttle.interval, OUTPUT_RETRY_MAX);
+        throttle.reset();
+        assert_eq!(throttle.interval, OUTPUT_RETRY);
+    }
+
+    #[test]
+    fn seeking_to_the_end_finishes_instead_of_restarting() {
+        let temp = TempDir::new();
+        let path = temp.0.join("tone.wav");
+        write_wav(&path);
+        let total = Duration::from_secs(1);
+        for at in [total, total + Duration::from_millis(500)] {
+            let (decoder, start) = decode_at(&path, at, Some(total)).unwrap();
+            assert_eq!(start, at);
+            if let Some(mut decoder) = decoder {
+                assert_eq!(decoder.next(), None, "a seek to {at:?} restarted the track");
+            }
+        }
+        let (decoder, start) = decode_at(&path, Duration::from_millis(400), Some(total)).unwrap();
+        assert_eq!(start, Duration::from_millis(400));
+        assert!(decoder.is_some());
+    }
+
+    #[test]
+    fn position_adds_the_seek_start_and_stops_at_the_end() {
+        let total = Some(Duration::from_secs(10));
+        assert_eq!(
+            playback_position(Duration::from_secs(4), Duration::from_secs(2), total),
+            Duration::from_secs(6)
+        );
+        assert_eq!(
+            playback_position(Duration::from_secs(9), Duration::from_secs(5), total),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            playback_position(Duration::from_secs(3), Duration::from_secs(1), None),
+            Duration::from_secs(4)
+        );
+    }
+
+    #[test]
+    fn without_an_output_playback_state_is_kept_for_when_one_appears() {
+        let temp = TempDir::new();
+        let path = temp.0.join("tone.wav");
+        write_wav(&path);
+        let mut player = MediaPlayer::with_output(None);
+        assert!(!player.has_output());
+        assert!(player.seek(Duration::from_millis(100)).is_err());
+        player.load(&path).unwrap();
+        player.set_volume(0.4);
+        player.play();
+        assert!(!player.is_paused());
+        assert!(!player.is_finished());
+        assert_eq!(player.duration(), Some(Duration::from_secs(1)));
+        player.seek(Duration::from_millis(600)).unwrap();
+        assert_eq!(player.position(), Duration::from_millis(600));
+        player.skip_forward(Duration::from_secs(5)).unwrap();
+        assert_eq!(player.position(), Duration::from_secs(1));
+        player.skip_backward(Duration::from_millis(300)).unwrap();
+        assert_eq!(player.position(), Duration::from_millis(700));
+        player.set_volume(f32::NAN);
+        assert_eq!(player.volume(), 0.4);
+        player.stop();
+        assert_eq!(player.position(), Duration::ZERO);
+        assert!(player.is_paused());
     }
 }
