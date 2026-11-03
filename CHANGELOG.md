@@ -4,6 +4,28 @@ Release notes are scoped to the version in `Cargo.toml`. A section here does not
 
 ## [Unreleased]
 
+## [2.4.3]
+
+Version 2.4.3 keeps the music playing when you unplug headphones and shows
+covers in Discover.
+
+### Fixes
+
+- **Sound Follows Your Headphones**: Unplugging headphones or a hands-free
+  headset, or switching the output device, moves playback to the speakers or
+  the new device within a couple of seconds. The song carries on from the same
+  spot with the same volume and equalizer. If no output device is available,
+  Noir Player says so and starts playing again as soon as one appears.
+- **No More Freezes After Losing a Device**: Seeking or skipping right after an
+  output device disappears no longer freezes the window.
+
+### Improvements
+
+- **Covers in Discover**: Discover songs show their album covers.
+- **Crash Reports**: If Noir Player ever crashes, it writes the details to
+  `crash.log` in `%LOCALAPPDATA%
+oir-player`, so the problem can be found.
+
 ## [2.4.2]
 
 Version 2.4.2 keeps long playlists and the queue smooth, and makes the
