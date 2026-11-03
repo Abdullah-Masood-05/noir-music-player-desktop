@@ -4,7 +4,7 @@
 //! is told to drop it, so every thumbnail that leaves the cache is queued in
 //! `retired` for the next frame to release.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use gpui_kit::RenderImage;
@@ -29,7 +29,7 @@ pub struct DiscoverArt {
     capacity: usize,
     /// Songs waiting for a download slot, in the order they are listed.
     pending: VecDeque<(String, crate::api::Track)>,
-    in_flight: usize,
+    in_flight: HashSet<String>,
     retired: Vec<Arc<RenderImage>>,
 }
 
@@ -46,7 +46,7 @@ impl DiscoverArt {
             clock: 0,
             capacity: capacity.max(1),
             pending: VecDeque::new(),
-            in_flight: 0,
+            in_flight: HashSet::new(),
             retired: Vec::new(),
         }
     }
@@ -67,8 +67,13 @@ impl DiscoverArt {
         }
     }
 
+    /// Stops queued downloads, e.g. while new results are on their way.
+    pub fn hold(&mut self) {
+        self.pending.clear();
+    }
+
     /// Replaces the listed songs: art for songs no longer listed is released
-    /// and songs not seen yet are queued for download, top row first.
+    /// and songs still without art are queued for download, top row first.
     pub fn show(&mut self, tracks: &[crate::api::Track]) {
         let keys: Vec<String> = tracks.iter().map(crate::api::art_key).collect();
         self.pending.clear();
@@ -82,25 +87,31 @@ impl DiscoverArt {
             self.remove(&key);
         }
         for (key, track) in keys.into_iter().zip(tracks) {
-            if self.entries.contains_key(&key) {
-                continue;
+            match self.entries.get(&key) {
+                Some((ArtState::Loading, _)) if !self.in_flight.contains(&key) => {
+                    self.pending.push_back((key, track.clone()));
+                }
+                Some(_) => {}
+                None => {
+                    let now = self.tick();
+                    self.entries.insert(key.clone(), (ArtState::Loading, now));
+                    self.pending.push_back((key, track.clone()));
+                    self.evict();
+                }
             }
-            let now = self.tick();
-            self.entries.insert(key.clone(), (ArtState::Loading, now));
-            self.pending.push_back((key, track.clone()));
-            self.evict();
         }
     }
 
     /// The next song to download, if a slot is free. The caller must report
     /// back through `finish`.
     pub fn next_download(&mut self) -> Option<(String, crate::api::Track)> {
-        if self.in_flight >= MAX_IN_FLIGHT {
+        if self.in_flight.len() >= MAX_IN_FLIGHT {
             return None;
         }
         while let Some((key, track)) = self.pending.pop_front() {
-            if matches!(self.entries.get(&key), Some((ArtState::Loading, _))) {
-                self.in_flight += 1;
+            if matches!(self.entries.get(&key), Some((ArtState::Loading, _)))
+                && self.in_flight.insert(key.clone())
+            {
                 return Some((key, track));
             }
         }
@@ -110,7 +121,7 @@ impl DiscoverArt {
     /// Records a finished download. `Err` means it couldn't be fetched, so the
     /// entry is forgotten and the song is tried again next time it is listed.
     pub fn finish(&mut self, key: &str, outcome: Result<Option<Arc<RenderImage>>, ()>) {
-        self.in_flight = self.in_flight.saturating_sub(1);
+        self.in_flight.remove(key);
         let Some((state @ ArtState::Loading, _)) = self.entries.get_mut(key) else {
             // Evicted or no longer listed while downloading; never drawn, so nothing to release.
             return;
@@ -194,6 +205,40 @@ mod tests {
         art.finish(&started[0], Ok(Some(picture())));
         assert!(art.image(&started[0]).is_some());
         assert!(art.next_download().is_some(), "a freed slot is reused");
+    }
+
+    #[test]
+    fn songs_still_queued_are_queued_again_when_relisted() {
+        let tracks: Vec<Track> = (0..6).map(|i| track(&format!("Song {i}"))).collect();
+        let mut art = DiscoverArt::default();
+        art.show(&tracks);
+        let started: Vec<String> = std::iter::from_fn(|| art.next_download())
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(started.len(), MAX_IN_FLIGHT);
+        art.hold();
+        art.show(&tracks);
+        assert!(art.next_download().is_none(), "slots are still busy");
+        for key in &started {
+            art.finish(key, Ok(Some(picture())));
+        }
+        let rest: Vec<String> = std::iter::from_fn(|| art.next_download())
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(rest, [art_key(&tracks[4]), art_key(&tracks[5])]);
+    }
+
+    #[test]
+    fn a_song_relisted_while_downloading_is_not_downloaded_twice() {
+        let mut art = DiscoverArt::default();
+        let tracks = [track("Once")];
+        art.show(&tracks);
+        let (key, _) = art.next_download().unwrap();
+        art.show(&[]);
+        art.show(&tracks);
+        assert!(art.next_download().is_none());
+        art.finish(&key, Ok(Some(picture())));
+        assert!(art.image(&key).is_some(), "the running download fills it");
     }
 
     #[test]

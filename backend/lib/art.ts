@@ -25,6 +25,10 @@ const VARIANT_WORDS: readonly string[] = [
   "karaoke",
   "live",
   "sped up",
+  "slowed",
+  "reverb",
+  "acoustic",
+  "nightcore",
 ];
 
 /** Lowercase letters and digits in any script, separated by single spaces. */
@@ -43,26 +47,48 @@ function containsWords(text: string, phrase: string): boolean {
   return phrase !== "" && ` ${text} `.includes(` ${phrase} `);
 }
 
-/** A title without its "(feat. …)", "[Remastered]" or " - Single Version" tail. */
-function baseTitle(title: string): string {
-  return normalize(title.replace(/\s*[([].*$/, "").replace(/\s+-\s+.*$/, ""));
+/** A title split before its "(feat. …)", "[Remastered]", " - Single Version" or " feat. …" tail. */
+function splitTitle(title: string): { base: string; tail: string } {
+  const cut = title.search(/\s*[([]|\s+-\s+|\s+(?:feat\.?|ft\.?|featuring)\s/iu);
+  const base = normalize(cut === -1 ? title : title.slice(0, cut));
+  if (base === "") {
+    return { base: normalize(title), tail: "" };
+  }
+  return { base, tail: cut === -1 ? "" : normalize(title.slice(cut)) };
 }
 
+/** Where a credit like "A & B", "A, B", "A feat. B" or "A x B" splits into artists. */
+const CREDIT_SEPARATORS = /\s*[&,+]\s*|\s+(?:feat\.?|ft\.?|featuring|with|x|and)(?=\s)/giu;
+
+/** The requested artist is the whole credit or one or more of its whole names. */
 export function artistMatches(requested: string, candidate: string): boolean {
   const wanted = normalize(requested);
-  const found = normalize(candidate);
-  return containsWords(found, wanted);
-}
-
-export function titleMatches(requested: string, candidate: string): boolean {
-  const wanted = baseTitle(requested) || normalize(requested);
-  const found = baseTitle(candidate) || normalize(candidate);
-  if (!containsWords(found, wanted)) {
+  if (wanted === "") {
     return false;
   }
-  const asked = normalize(requested);
-  const got = normalize(candidate);
-  return !VARIANT_WORDS.some((word) => containsWords(got, word) && !containsWords(asked, word));
+  const starts = [0];
+  const ends: number[] = [];
+  for (const separator of candidate.matchAll(CREDIT_SEPARATORS)) {
+    ends.push(separator.index);
+    starts.push(separator.index + separator[0].length);
+  }
+  ends.push(candidate.length);
+  // Runs of names too, so "Simon & Garfunkel" or "Lil Nas X" survive the split.
+  return starts.some((start, i) =>
+    ends.slice(i).some((end) => end > start && normalize(candidate.slice(start, end)) === wanted),
+  );
+}
+
+/** Same title, and the result's tail doesn't make it a remix, live take or the like. */
+export function titleMatches(requested: string, candidate: string): boolean {
+  const asked = splitTitle(requested);
+  const got = splitTitle(candidate);
+  if (asked.base === "" || asked.base !== got.base) {
+    return false;
+  }
+  return !VARIANT_WORDS.some(
+    (word) => containsWords(got.tail, word) && !containsWords(asked.tail, word),
+  );
 }
 
 /** True for an HTTPS URL on one of the image CDNs, with nothing but a path and query. */

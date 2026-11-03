@@ -508,6 +508,7 @@ impl NoirPlayerModel {
         self.discover_loading = true;
         self.discover_error = None;
         self.discover_tracks.clear();
+        self.discover_art.hold();
         let query = query.trim().to_owned();
         let keys = crate::config::ApiKeys::from_store(&self.store);
         cx.spawn(async move |this, cx| {

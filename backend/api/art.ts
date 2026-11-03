@@ -47,11 +47,14 @@ const lastfm: Source = async (artist, track, timeoutMs) => {
     format: "json",
   });
   const upstream = await fetchJson(`https://ws.audioscrobbler.com/2.0/?${params}`, {}, timeoutMs);
-  // Last.fm reports errors with a 200; only 6, "track not found", is a real miss.
-  if (upstream.ok && "error" in upstream.body && upstream.body.error !== 6) {
+  // Error 6, "track not found", is the only real miss, whatever status it comes with.
+  if (upstream.ok && upstream.body.error === 6) {
+    return { image: null, failed: false };
+  }
+  if (upstream.ok && "error" in upstream.body) {
     return { image: null, failed: true };
   }
-  return answered(upstream, (body) => ("error" in body ? null : lastfmImage(body)));
+  return answered(upstream, lastfmImage);
 };
 
 const itunes: Source = async (artist, track, timeoutMs) => {
@@ -68,7 +71,11 @@ const itunes: Source = async (artist, track, timeoutMs) => {
 const deezer: Source = async (artist, track, timeoutMs) => {
   const params = new URLSearchParams({ q: `${track} ${artist}`, limit: "5" });
   const upstream = await fetchJson(`https://api.deezer.com/search?${params}`, {}, timeoutMs);
-  return answered(upstream, (body) => ("error" in body ? null : deezerImage(body, artist, track)));
+  // Deezer sends quota and rate-limit errors with a 200.
+  if (upstream.ok && "error" in upstream.body) {
+    return { image: null, failed: true };
+  }
+  return answered(upstream, (body) => deezerImage(body, artist, track));
 };
 
 export async function GET(request: Request): Promise<Response> {
