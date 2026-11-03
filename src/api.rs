@@ -446,6 +446,110 @@ pub fn safe_track_url(url: &str) -> bool {
     url.starts_with("https://www.last.fm/music/") || url.starts_with("https://last.fm/music/")
 }
 
+/// The image CDNs the backend's `/api/art` answers with.
+const ART_HOSTS: [&str; 8] = [
+    "lastfm.freetls.fastly.net",
+    "cdn-images.dzcdn.net",
+    "e-cdns-images.dzcdn.net",
+    "is1-ssl.mzstatic.com",
+    "is2-ssl.mzstatic.com",
+    "is3-ssl.mzstatic.com",
+    "is4-ssl.mzstatic.com",
+    "is5-ssl.mzstatic.com",
+];
+
+/// Thumbnails are a couple of hundred pixels square; anything bigger is not one.
+const MAX_ART_BYTES: u64 = 512 * 1024;
+
+/// Whether `url` is an HTTPS image on one of the known cover-art CDNs.
+pub fn safe_art_url(url: &str) -> bool {
+    let Ok(uri) = validate_audio_url(url) else {
+        return false;
+    };
+    uri.port_u16().is_none()
+        && uri
+            .host()
+            .is_some_and(|host| ART_HOSTS.contains(&host.to_ascii_lowercase().as_str()))
+}
+
+/// What Discover's art is cached under: one entry per song, however it is cased.
+pub fn art_key(track: &Track) -> String {
+    format!(
+        "{}\u{1f}{}",
+        track.artist.trim().to_lowercase(),
+        track.name.trim().to_lowercase()
+    )
+}
+
+/// The cover art URL for a Discover song, or `None` when no service has one.
+/// Always asked of the backend: it combines services no key in Settings covers.
+pub fn fetch_art_url(track: &Track) -> Result<Option<String>> {
+    let root = backend_json(
+        &format!(
+            "/api/art?artist={}&track={}",
+            urlencoding::encode(track.artist.trim()),
+            urlencoding::encode(track.name.trim())
+        ),
+        Duration::from_secs(10),
+    )?;
+    parse_art(&root)
+}
+
+fn parse_art(root: &Value) -> Result<Option<String>> {
+    match root.get("image") {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(url)) if safe_art_url(url) => Ok(Some(url.clone())),
+        _ => bail!("Noir Player's server sent back unusable cover art."),
+    }
+}
+
+/// Downloads a cover thumbnail, refusing anything that isn't a small JPEG or PNG.
+pub fn fetch_art_bytes(url: &str) -> Result<Vec<u8>> {
+    if !safe_art_url(url) {
+        bail!("Cover art URL is not on a known image host.");
+    }
+    let mut response = network_agent(Duration::from_secs(10))
+        .get(url)
+        .call()
+        .map_err(|_| anyhow!("Could not download cover art."))?;
+    if response.status().as_u16() != 200 {
+        bail!("Cover art download was unsuccessful.");
+    }
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !art_content_type(content_type) {
+        bail!("Cover art was not a JPEG or PNG image.");
+    }
+    if response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_ART_BYTES)
+    {
+        bail!("Cover art is too large.");
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_ART_BYTES)
+        .read_to_vec()
+        .map_err(|_| anyhow!("Could not read cover art."))
+}
+
+fn art_content_type(value: &str) -> bool {
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    essence == "image/jpeg" || essence == "image/png"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,8 +651,8 @@ mod tests {
     }
 
     /// Drives the app's own request code against the deployed backend with
-    /// no keys of its own, as it runs for anyone who hasn't entered any. Makes one Last.fm request and
-    /// one YouTube search, so it is opt-in:
+    /// no keys of its own, as it runs for anyone who hasn't entered any. Makes a few Last.fm requests,
+    /// one YouTube search and one cover art lookup, so it is opt-in:
     /// `cargo test -- --ignored live_backend`.
     #[test]
     #[ignore = "calls the deployed backend and spends service quota"]
@@ -566,6 +670,92 @@ mod tests {
         let refused = backend_json("/api/resolve?id=nope", Duration::from_secs(15))
             .expect_err("a malformed id is refused");
         assert!(!refused.to_string().is_empty());
+        let numb = Track {
+            name: "Numb".into(),
+            artist: "Linkin Park".into(),
+            url: None,
+        };
+        let art = fetch_art_url(&numb)
+            .expect("art through the backend")
+            .expect("Numb has cover art");
+        assert!(!fetch_art_bytes(&art).expect("the thumbnail").is_empty());
+    }
+
+    #[test]
+    fn art_urls_must_be_https_on_the_known_image_hosts() {
+        for url in [
+            "https://lastfm.freetls.fastly.net/i/u/300x300/abc.png",
+            "https://cdn-images.dzcdn.net/images/cover/abc/250x250-000000-80-0-0.jpg",
+            "https://e-cdns-images.dzcdn.net/images/cover/abc/250x250.jpg",
+            "https://is1-ssl.mzstatic.com/image/thumb/Music/x.jpg/200x200bb.jpg",
+            "https://IS5-SSL.mzstatic.com/image/thumb/x/200x200bb.jpg",
+        ] {
+            assert!(safe_art_url(url), "{url}");
+        }
+        for url in [
+            "http://lastfm.freetls.fastly.net/i/u/abc.png",
+            "https://is6-ssl.mzstatic.com/x.jpg",
+            "https://mzstatic.com/x.jpg",
+            "https://evil.test/is1-ssl.mzstatic.com/x.jpg",
+            "https://is1-ssl.mzstatic.com.evil.test/x.jpg",
+            "https://user@is1-ssl.mzstatic.com/x.jpg",
+            "https://is1-ssl.mzstatic.com:443/x.jpg",
+            "https://is1-ssl.mzstatic.com:8443/x.jpg",
+            "https://is1-ssl.mzstatic.com/x.jpg#frag",
+            "file:///C:/art.jpg",
+            "",
+        ] {
+            assert!(!safe_art_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn art_keys_ignore_case_and_keep_artist_and_title_apart() {
+        let track = |artist: &str, name: &str| Track {
+            name: name.into(),
+            artist: artist.into(),
+            url: None,
+        };
+        assert_eq!(
+            art_key(&track("Linkin Park", "Numb")),
+            art_key(&track(" LINKIN PARK", "numb "))
+        );
+        assert_eq!(art_key(&track("A", "B")), "a\u{1f}b");
+        assert_ne!(art_key(&track("A B", "C")), art_key(&track("A", "B C")));
+    }
+
+    #[test]
+    fn parses_art_answers_and_refuses_unsafe_urls() {
+        assert_eq!(parse_art(&json!({"image": null})).unwrap(), None);
+        assert_eq!(
+            parse_art(&json!({"image": "https://cdn-images.dzcdn.net/images/cover/a/250x250.jpg"}))
+                .unwrap()
+                .as_deref(),
+            Some("https://cdn-images.dzcdn.net/images/cover/a/250x250.jpg")
+        );
+        for root in [
+            json!({}),
+            json!({"image": 42}),
+            json!({"image": "https://evil.test/a.jpg"}),
+            json!({"image": "http://cdn-images.dzcdn.net/a.jpg"}),
+        ] {
+            assert!(parse_art(&root).is_err(), "{root}");
+        }
+    }
+
+    #[test]
+    fn only_jpeg_and_png_art_is_accepted() {
+        assert!(art_content_type("image/jpeg"));
+        assert!(art_content_type("Image/PNG; charset=binary"));
+        for value in [
+            "",
+            "image/webp",
+            "text/html",
+            "image/svg+xml",
+            "image/jpegx",
+        ] {
+            assert!(!art_content_type(value), "{value}");
+        }
     }
 
     #[test]

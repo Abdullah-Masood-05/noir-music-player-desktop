@@ -7,8 +7,8 @@ use gpui_kit::*;
 
 use crate::app::NoirPlayerModel;
 use crate::views::ui::{
-    dynamic_border, dynamic_subtitle, dynamic_surface, dynamic_text, icon_text, red, red_a,
-    top_fade,
+    dynamic_border, dynamic_subtitle, dynamic_surface, dynamic_text, icon_text, img_from_image,
+    red, red_a, top_fade,
 };
 
 pub fn render_discover(model: &mut NoirPlayerModel, cx: &mut Context<NoirPlayerModel>) -> Div {
@@ -33,6 +33,11 @@ pub fn render_discover(model: &mut NoirPlayerModel, cx: &mut Context<NoirPlayerM
             .child("No tracks found. Try another title or artist.")
             .into_any_element()
     } else {
+        let thumbs: Vec<_> = model
+            .discover_tracks
+            .iter()
+            .map(|track| model.discover_art.image(&crate::api::art_key(track)))
+            .collect();
         v_flex()
             .gap_2()
             .children(model.discover_tracks.iter().enumerate().map(|(i, track)| {
@@ -48,17 +53,24 @@ pub fn render_discover(model: &mut NoirPlayerModel, cx: &mut Context<NoirPlayerM
                         d.border_1().border_color(dynamic_border(is_light))
                     })
                     .items_center()
-                    .child(
-                        div()
+                    .child(match thumbs[i].clone() {
+                        Some(image) => img_from_image(image)
                             .size(px(48.0))
+                            .rounded_lg()
+                            .flex_shrink_0()
+                            .into_any_element(),
+                        None => div()
+                            .size(px(48.0))
+                            .flex_shrink_0()
                             .rounded_lg()
                             .bg(red_a(0.12))
                             .flex()
                             .items_center()
                             .justify_center()
                             .text_color(red())
-                            .child(icon_text(MusicIcon::Music4, 30.0)),
-                    )
+                            .child(icon_text(MusicIcon::Music4, 30.0))
+                            .into_any_element(),
+                    })
                     .child(
                         v_flex()
                             .flex_1()

@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod config;
 mod crash;
+mod discover_art;
 mod handoff;
 mod media;
 mod single_instance;

@@ -96,6 +96,27 @@ pub fn hero_image(bytes: &[u8]) -> Option<gpui_kit::RenderImage> {
     decode_artwork(bytes).map(|decoded| render_image(Cow::Owned(decoded)))
 }
 
+/// Longest edge of a Discover row's thumbnail: twice the 48 px it is drawn at.
+const DISCOVER_THUMB_EDGE: u32 = 96;
+
+/// Decodes downloaded Discover cover art into a thumbnail ready to draw.
+pub fn discover_thumb(bytes: &[u8]) -> Option<Arc<gpui_kit::RenderImage>> {
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    // A few hundred KiB of JPEG can still claim enormous dimensions.
+    if width.max(height) > 4096 {
+        return None;
+    }
+    let decoded = decode_artwork(bytes)?;
+    Some(Arc::new(render_image(fit_within(
+        &decoded,
+        DISCOVER_THUMB_EDGE,
+    ))))
+}
+
 fn decode_artwork(bytes: &[u8]) -> Option<image::RgbaImage> {
     let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -2339,6 +2360,17 @@ mod tests {
                 "an album decoded its cover more than once"
             );
         }
+    }
+
+    #[test]
+    fn discover_thumbnails_are_bounded_and_garbage_is_refused() {
+        let thumb = discover_thumb(&encoded_artwork(200, 150)).expect("thumbnail decodes");
+        assert_eq!(thumb.size(0).width.0, DISCOVER_THUMB_EDGE as i32);
+        assert_eq!(thumb.size(0).height.0, 72);
+        let small = discover_thumb(&encoded_artwork(40, 40)).expect("small art decodes");
+        assert_eq!(small.size(0).width.0, 40);
+        assert!(discover_thumb(b"<html>not an image</html>").is_none());
+        assert!(discover_thumb(&[]).is_none());
     }
 
     #[test]

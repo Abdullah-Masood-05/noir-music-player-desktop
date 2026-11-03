@@ -295,6 +295,8 @@ pub struct NoirPlayerModel {
     discover_audio_job: Option<DiscoverAudioJob>,
     discover_cached: Vec<media::PreparedAudio>,
     discover_downloads: Vec<Track>,
+    /// Thumbnails for the listed Discover songs.
+    pub discover_art: crate::discover_art::DiscoverArt,
     pub song_menu: Option<SongMenu>,
     /// Resuming happens once, after the first scan finds the library.
     resume_attempted: bool,
@@ -440,6 +442,7 @@ impl NoirPlayerModel {
             discover_audio_job: None,
             discover_cached: Vec::new(),
             discover_downloads: Vec::new(),
+            discover_art: Default::default(),
             song_menu: None,
             resume_attempted: false,
             data_generation: 0,
@@ -500,6 +503,7 @@ impl NoirPlayerModel {
         self.discover_loading = true;
         self.discover_error = None;
         self.discover_tracks.clear();
+        self.discover_art.hold();
         let query = query.trim().to_owned();
         let keys = crate::config::ApiKeys::from_store(&self.store);
         cx.spawn(async move |this, cx| {
@@ -522,11 +526,32 @@ impl NoirPlayerModel {
                     Ok(tracks) => this.discover_tracks = tracks,
                     Err(error) => this.discover_error = Some(error.to_string()),
                 }
+                this.discover_art.show(&this.discover_tracks);
+                this.start_discover_art(cx);
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    /// Starts thumbnail downloads for listed songs while a slot is free; each
+    /// one that finishes starts the next.
+    fn start_discover_art(&mut self, cx: &mut Context<Self>) {
+        while let Some((key, track)) = self.discover_art.next_download() {
+            cx.spawn(async move |this, cx| {
+                let outcome = cx
+                    .background_executor()
+                    .spawn(async move { load_discover_art(&track) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.discover_art.finish(&key, outcome);
+                    this.start_discover_art(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     pub fn discover_audio_busy(&self) -> bool {
@@ -2308,6 +2333,9 @@ impl NoirPlayerModel {
         for cover in self.retired_covers.drain(..) {
             let _ = window.drop_image(cover);
         }
+        for thumb in self.discover_art.take_retired() {
+            let _ = window.drop_image(thumb);
+        }
     }
 
     fn release_hero_cover(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
@@ -2317,6 +2345,15 @@ impl NoirPlayerModel {
             let _ = window.drop_image(image);
         }
     }
+}
+
+/// `Err` when the art couldn't be fetched, so it is worth asking again later.
+fn load_discover_art(track: &crate::api::Track) -> Result<Option<std::sync::Arc<RenderImage>>, ()> {
+    let Some(url) = crate::api::fetch_art_url(track).map_err(|_| ())? else {
+        return Ok(None);
+    };
+    let bytes = crate::api::fetch_art_bytes(&url).map_err(|_| ())?;
+    Ok(crate::media::discover_thumb(&bytes))
 }
 
 impl Render for NoirPlayerModel {
