@@ -1,6 +1,5 @@
 //! Panic reports for `crash.log`, since release builds have no console.
 
-use std::backtrace::Backtrace;
 use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -64,15 +63,16 @@ fn report(info: &PanicHookInfo<'_>) -> String {
         &chrono::Local::now()
             .format("%Y-%m-%d %H:%M:%S %:z")
             .to_string(),
+        std::thread::current().name().unwrap_or("unnamed"),
         message,
         &location,
-        &Backtrace::force_capture().to_string(),
     )
 }
 
-fn format_report(timestamp: &str, message: &str, location: &str, backtrace: &str) -> String {
+// No backtrace: release builds are stripped, so its frames would all be unresolved.
+fn format_report(timestamp: &str, thread: &str, message: &str, location: &str) -> String {
     format!(
-        "=== {timestamp} Noir Player {} panicked at {location}\n{message}\n{backtrace}\n",
+        "=== {timestamp} Noir Player {} panicked on thread '{thread}' at {location}\n{message}\n",
         env!("CARGO_PKG_VERSION"),
     )
 }
@@ -117,11 +117,11 @@ mod tests {
 
     #[test]
     fn report_names_message_location_and_version() {
-        let text = format_report("2026-01-01", "boom", "src/media.rs:1:2", "frames");
+        let text = format_report("2026-01-01", "audio-output", "boom", "src/media.rs:1:2");
         assert!(text.contains("boom"));
         assert!(text.contains("src/media.rs:1:2"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
-        assert!(text.contains("frames"));
+        assert!(text.contains("'audio-output'"));
     }
 
     #[test]
