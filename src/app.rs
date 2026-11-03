@@ -280,7 +280,7 @@ pub struct NoirPlayerModel {
     pub current: Option<usize>,
     pub queue: Vec<usize>,
     pub is_playing: bool,
-    pub player: Option<MediaPlayer>,
+    pub player: MediaPlayer,
     pub status: SharedString,
     pub scanning: bool,
     pub volume: f32,
@@ -349,10 +349,7 @@ pub struct NoirPlayerModel {
 
 impl NoirPlayerModel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (player, error) = match MediaPlayer::new() {
-            Ok(player) => (Some(player), None),
-            Err(error) => (None, Some(format!("Audio device unavailable: {error:#}"))),
-        };
+        let player = MediaPlayer::new();
         let (store, store_path, storage_error) = match Store::default_path() {
             Ok(path) => match Store::load(&path) {
                 Ok(store) => (store, Some(path), None),
@@ -396,11 +393,9 @@ impl NoirPlayerModel {
         ];
         let volume = store.volume;
         let favourites_set = store.favourites.iter().cloned().collect();
-        if let Some(player) = player.as_ref() {
-            player.set_volume(volume);
-            player.set_equalizer_enabled(store.equalizer_enabled);
-            player.set_equalizer_gains(store.equalizer_gains);
-        }
+        player.set_volume(volume);
+        player.set_equalizer_enabled(store.equalizer_enabled);
+        player.set_equalizer_gains(store.equalizer_gains);
         cx.spawn(async move |this, cx| loop {
             smol::Timer::after(Duration::from_millis(250)).await;
             if this.update(cx, |this, cx| this.tick(cx)).is_err() {
@@ -424,7 +419,7 @@ impl NoirPlayerModel {
             hero_cover: None,
             store_path,
             storage_error,
-            error,
+            error: None,
             current: None,
             queue: Vec::new(),
             is_playing: false,
@@ -756,9 +751,7 @@ impl NoirPlayerModel {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(crate::update::InstallOutcome::Quit) => {
                     this.is_playing = false;
-                    if let Some(player) = this.player.as_mut() {
-                        player.stop();
-                    }
+                    this.player.stop();
                     cx.quit();
                 }
                 Ok(crate::update::InstallOutcome::Stay(message)) => {
@@ -810,7 +803,7 @@ impl NoirPlayerModel {
                 self.play_index(index, cx);
                 return;
             }
-            if self.player.is_none() {
+            if !self.player.has_output() {
                 self.discover_audio_error =
                     Some("Audio device unavailable. Download is still available.".into());
                 cx.notify();
@@ -1016,9 +1009,7 @@ impl NoirPlayerModel {
         if self.current.is_none() {
             self.cancel_seek_drag();
             self.is_playing = false;
-            if let Some(player) = self.player.as_mut() {
-                player.stop();
-            }
+            self.player.stop();
         }
         self.resume_last_song(cx);
         cx.notify();
@@ -1353,14 +1344,11 @@ impl NoirPlayerModel {
 
     /// Seeks the playing song to `fraction` of its duration.
     pub fn seek_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
-        let Some(player) = self.player.as_ref() else {
+        let Some(total) = self.player.duration().filter(|total| !total.is_zero()) else {
             return;
         };
-        let Some(total) = player.duration().filter(|total| !total.is_zero()) else {
-            return;
-        };
-        let target = total.mul_f32(fraction.clamp(0.0, 1.0));
-        if let Err(error) = player.seek(target) {
+        let target = scale_duration(total, fraction);
+        if let Err(error) = self.player.seek(target) {
             self.error = Some(format!("{error:#}"));
         }
         cx.notify();
@@ -1375,10 +1363,7 @@ impl NoirPlayerModel {
     }
 
     fn can_seek(&self) -> bool {
-        self.player
-            .as_ref()
-            .and_then(MediaPlayer::duration)
-            .is_some_and(|total| !total.is_zero())
+        self.player.duration().is_some_and(|total| !total.is_zero())
     }
 
     pub fn drag_slider_to(&mut self, x: Pixels, cx: &mut Context<Self>) {
@@ -1722,17 +1707,15 @@ impl NoirPlayerModel {
     }
 
     pub fn skip_forward(&mut self, cx: &mut Context<Self>) {
-        if let Some(player) = self.player.as_ref() {
-            let offset = Duration::from_secs(self.store.seek_interval_seconds as u64);
-            let _ = player.skip_forward(offset);
+        let offset = Duration::from_secs(self.store.seek_interval_seconds as u64);
+        if self.player.skip_forward(offset).is_ok() {
             cx.notify();
         }
     }
 
     pub fn skip_backward(&mut self, cx: &mut Context<Self>) {
-        if let Some(player) = self.player.as_ref() {
-            let offset = Duration::from_secs(self.store.seek_interval_seconds as u64);
-            let _ = player.skip_backward(offset);
+        let offset = Duration::from_secs(self.store.seek_interval_seconds as u64);
+        if self.player.skip_backward(offset).is_ok() {
             cx.notify();
         }
     }
@@ -1741,9 +1724,7 @@ impl NoirPlayerModel {
         let volume = volume.clamp(0.0, 1.0);
         self.volume = volume;
         self.store.volume = volume;
-        if let Some(player) = self.player.as_ref() {
-            player.set_volume(volume);
-        }
+        self.player.set_volume(volume);
         self.volume_hud_until = Some(std::time::Instant::now() + VOLUME_HUD_DURATION);
         self.settle_volume(cx);
         cx.notify();
@@ -2027,7 +2008,10 @@ impl NoirPlayerModel {
                 }
             }
         }
-        if self.is_playing && self.player.as_ref().is_some_and(MediaPlayer::is_finished) {
+        if self.player.poll() {
+            dirty = true;
+        }
+        if self.is_playing && self.player.is_finished() {
             self.cancel_seek_drag();
             self.track_finished(cx);
             dirty = true;
@@ -2060,16 +2044,14 @@ impl NoirPlayerModel {
     /// Loads a song and leaves it paused at the start, for "Resume on
     /// startup". Nothing is recorded as played, because nothing played.
     fn cue_index(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        let loaded = match (self.tracks.get(index), self.player.as_mut()) {
-            (Some(track), Some(player)) => player.load(&track.path).is_ok(),
-            _ => false,
+        let loaded = match self.tracks.get(index) {
+            Some(track) => self.player.load(&track.path).is_ok(),
+            None => false,
         };
         if !loaded {
             return false;
         }
-        if let Some(player) = self.player.as_ref() {
-            player.set_volume(self.volume);
-        }
+        self.player.set_volume(self.volume);
         self.cancel_seek_drag();
         self.current = Some(index);
         self.is_playing = false;
@@ -2098,19 +2080,16 @@ impl NoirPlayerModel {
 
     fn load_index(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
         self.cancel_preparing_audio(cx);
-        let result = match (self.tracks.get(index), self.player.as_mut()) {
-            (Some(track), Some(player)) => player.load(&track.path),
-            (None, _) => Err(anyhow::anyhow!(
+        let result = match self.tracks.get(index) {
+            Some(track) => self.player.load(&track.path),
+            None => Err(anyhow::anyhow!(
                 "This song is no longer in the library; rescan the Music folder"
             )),
-            (_, None) => Err(anyhow::anyhow!("Audio device unavailable")),
         };
         match result {
             Ok(()) => {
-                if let Some(player) = self.player.as_ref() {
-                    player.set_volume(self.volume);
-                    player.play();
-                }
+                self.player.set_volume(self.volume);
+                self.player.play();
                 self.cancel_seek_drag();
                 self.current = Some(index);
                 self.is_playing = true;
@@ -2136,14 +2115,14 @@ impl NoirPlayerModel {
 
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
         self.cancel_preparing_audio(cx);
-        if let (Some(index), Some(player)) = (self.current, self.player.as_ref()) {
-            if player.is_finished() {
+        if let Some(index) = self.current {
+            if self.player.is_finished() {
                 self.load_index(index, cx);
             } else {
                 if self.is_playing {
-                    player.pause();
+                    self.player.pause();
                 } else {
-                    player.play();
+                    self.player.play();
                 }
                 self.is_playing = !self.is_playing;
                 cx.notify();
@@ -2187,20 +2166,15 @@ impl NoirPlayerModel {
     /// it leaves Recently played (the song is already at the top) and lyrics
     /// alone, and `current` never changes, so the cover art stays put.
     fn restart_current(&mut self, cx: &mut Context<Self>) -> bool {
-        let loaded = match (
-            self.current.and_then(|index| self.tracks.get(index)),
-            self.player.as_mut(),
-        ) {
-            (Some(track), Some(player)) => player.load(&track.path).is_ok(),
-            _ => false,
+        let loaded = match self.current.and_then(|index| self.tracks.get(index)) {
+            Some(track) => self.player.load(&track.path).is_ok(),
+            None => false,
         };
         if !loaded {
             return false;
         }
-        if let Some(player) = self.player.as_ref() {
-            player.set_volume(self.volume);
-            player.play();
-        }
+        self.player.set_volume(self.volume);
+        self.player.play();
         self.cancel_seek_drag();
         self.is_playing = true;
         cx.notify();
@@ -2209,9 +2183,7 @@ impl NoirPlayerModel {
 
     fn stop_playback(&mut self, cx: &mut Context<Self>) {
         self.is_playing = false;
-        if let Some(player) = self.player.as_ref() {
-            player.pause();
-        }
+        self.player.pause();
         cx.notify();
     }
 
@@ -2257,37 +2229,30 @@ impl NoirPlayerModel {
         if let Some(preview) = self.seek_preview {
             return preview.clamp(0.0, 1.0);
         }
-        match (self.current, self.player.as_ref()) {
-            (Some(_), Some(player)) => {
-                let total = player.duration().unwrap_or(Duration::from_secs(1));
-                if total.is_zero() {
-                    0.0
-                } else {
-                    (player.position().as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0)
-                }
-            }
-            _ => 0.0,
+        if self.current.is_none() {
+            return 0.0;
+        }
+        let total = self.player.duration().unwrap_or(Duration::from_secs(1));
+        if total.is_zero() {
+            0.0
+        } else {
+            (self.player.position().as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0)
         }
     }
 
     pub fn times(&self) -> (String, String) {
-        match self.player.as_ref() {
-            Some(player) => {
-                let fmt = |d: Duration| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60);
-                let total = player.duration().unwrap_or_default();
-                let elapsed = match self.seek_preview {
-                    Some(preview) => total.mul_f32(preview.clamp(0.0, 1.0)),
-                    None => player.position(),
-                };
-                (fmt(elapsed), fmt(total))
-            }
-            None => ("0:00".to_string(), "0:00".to_string()),
-        }
+        let fmt = |d: Duration| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60);
+        let total = self.player.duration().unwrap_or_default();
+        let elapsed = match self.seek_preview {
+            Some(preview) => scale_duration(total, preview),
+            None => self.player.position(),
+        };
+        (fmt(elapsed), fmt(total))
     }
 
     /// Peak meter of the audio being played, for the waveform strips.
     pub fn audio_meter(&self) -> Option<crate::media::LevelMeter> {
-        self.player.as_ref().map(MediaPlayer::meter)
+        Some(self.player.meter())
     }
 
     pub fn now_playing(&self) -> Option<&Track> {
@@ -2567,6 +2532,19 @@ impl Render for NoirPlayerModel {
                     .text_color(crate::views::ui::red())
                     .child(error)
             }))
+            .when(!self.player.has_output(), |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .text_sm()
+                        .text_color(crate::views::ui::dynamic_subtitle(is_light))
+                        .child(
+                            "No audio output found. Playback will continue when one is connected.",
+                        ),
+                )
+            })
             .children(self.error.clone().map(|error| {
                 h_flex()
                     .flex_shrink_0()
@@ -2730,6 +2708,15 @@ fn volume_hud(volume: f32, is_light: bool) -> Div {
                         .child(format!("{pct}%")),
                 ),
         )
+}
+
+/// `fraction` of `total`; `Duration::mul_f32` panics on NaN or infinity.
+fn scale_duration(total: Duration, fraction: f32) -> Duration {
+    if fraction.is_finite() {
+        total.mul_f32(fraction.clamp(0.0, 1.0))
+    } else {
+        Duration::ZERO
+    }
 }
 
 fn shuffle_seed() -> usize {
@@ -2947,5 +2934,21 @@ mod escape_tests {
             ..EscapeContext::default()
         };
         assert_eq!(escape_action(state), EscapeAction::CloseSettings);
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::scale_duration;
+    use std::time::Duration;
+
+    #[test]
+    fn scaling_clamps_and_ignores_non_finite_fractions() {
+        let total = Duration::from_secs(200);
+        assert_eq!(scale_duration(total, 0.5), Duration::from_secs(100));
+        assert_eq!(scale_duration(total, 2.0), total);
+        assert_eq!(scale_duration(total, -1.0), Duration::ZERO);
+        assert_eq!(scale_duration(total, f32::NAN), Duration::ZERO);
+        assert_eq!(scale_duration(total, f32::INFINITY), Duration::ZERO);
     }
 }

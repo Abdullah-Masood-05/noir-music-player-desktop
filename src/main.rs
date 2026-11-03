@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod config;
+mod crash;
 mod handoff;
 mod media;
 mod single_instance;
@@ -40,6 +41,7 @@ fn native_window_options(cx: &App) -> WindowOptions {
 }
 
 fn main() {
+    crash::install();
     // A shortcut, taskbar pin or `.desktop` file just runs the executable
     // again; ask any instance already running to come forward instead of
     // opening a second window onto the same library and the same audio
