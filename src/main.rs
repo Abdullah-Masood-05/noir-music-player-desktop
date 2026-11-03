@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod config;
+mod discover_art;
 mod handoff;
 mod media;
 mod single_instance;
