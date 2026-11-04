@@ -4,6 +4,26 @@ Release notes are scoped to the version in `Cargo.toml`. A section here does not
 
 ## [Unreleased]
 
+## [2.4.4]
+
+Version 2.4.4 keeps Discover covers with your songs and makes the keyboard
+shortcuts work right away.
+
+### Improvements
+
+- **Covers Stay With Discover Songs**: A song you play from Discover shows its
+  cover in the player bar and the full player, and a song you download keeps
+  its cover inside the file, so it shows in your library and in other apps.
+- **The Noir Player Logo in the Sidebar**: The sidebar shows the Noir Player
+  logo.
+
+### Fixes
+
+- **Shortcuts Work After Clicking a Button**: Space and the arrow keys control
+  playback straight after you click Play in Discover, without opening the
+  full player first.
+- **Typing in Settings Search**: The search box in Settings takes typing.
+
 ## [2.4.3]
 
 Version 2.4.3 keeps the music playing when you unplug headphones and shows
