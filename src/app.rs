@@ -2424,6 +2424,15 @@ impl Render for NoirPlayerModel {
             .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // Buttons keep focus where it was on purpose, so a click on one would
+            // leave a search box focused and the playback keys typing into it.
+            // Every click therefore leaves the text box first; a click on a text
+            // box puts its focus straight back before anything reads it.
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                if window.has_focused_input(cx) {
+                    window.focus(&this.root_focus_handle, cx);
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let is_typing = this
                     .library_search

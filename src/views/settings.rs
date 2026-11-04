@@ -133,7 +133,11 @@ pub fn render_settings_modal(
                     }))
                     .on_click(cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
-                        window.focus(&this.settings_focus_handle, cx);
+                        // A click on a text box has just focused it; the root's
+                        // mouse-down rule already took focus off one clicked away from.
+                        if !window.has_focused_input(cx) {
+                            window.focus(&this.settings_focus_handle, cx);
+                        }
                     }))
                     .child(modal_header(model, is_light, cx))
                     .child(category_chips(model, is_light, cx))

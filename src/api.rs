@@ -460,6 +460,8 @@ const ART_HOSTS: [&str; 8] = [
 
 /// Thumbnails are a couple of hundred pixels square; anything bigger is not one.
 const MAX_ART_BYTES: u64 = 512 * 1024;
+/// The larger cover embedded into a downloaded song.
+const MAX_COVER_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Whether `url` is an HTTPS image on one of the known cover-art CDNs.
 pub fn safe_art_url(url: &str) -> bool {
@@ -505,6 +507,42 @@ fn parse_art(root: &Value) -> Result<Option<String>> {
 
 /// Downloads a cover thumbnail, refusing anything that isn't a small JPEG or PNG.
 pub fn fetch_art_bytes(url: &str) -> Result<Vec<u8>> {
+    fetch_image(url, MAX_ART_BYTES)
+}
+
+/// The cover to embed into a Discover song: the largest size the image
+/// service offers within reason, falling back to the thumbnail itself.
+/// `None` when the song has no art or none of it could be fetched.
+pub fn fetch_cover_art(track: &Track) -> Option<Vec<u8>> {
+    let url = fetch_art_url(track).ok()??;
+    let large = large_art_url(&url);
+    if large != url {
+        if let Ok(bytes) = fetch_image(&large, MAX_COVER_BYTES) {
+            return Some(bytes);
+        }
+    }
+    fetch_image(&url, MAX_COVER_BYTES).ok()
+}
+
+/// iTunes names the size in the file name (`.../200x200bb.jpg`) and serves
+/// any size asked for; the other services' URLs are left alone.
+pub fn large_art_url(url: &str) -> String {
+    let itunes = safe_art_url(url)
+        && validate_audio_url(url).is_ok_and(|uri| {
+            uri.host()
+                .is_some_and(|host| host.to_ascii_lowercase().ends_with(".mzstatic.com"))
+                && uri.query().is_none()
+        });
+    match url.rsplit_once('/') {
+        Some((base, file)) if itunes => match file.strip_prefix("200x200bb.") {
+            Some(extension) => format!("{base}/600x600bb.{extension}"),
+            None => url.to_owned(),
+        },
+        _ => url.to_owned(),
+    }
+}
+
+fn fetch_image(url: &str, limit: u64) -> Result<Vec<u8>> {
     if !safe_art_url(url) {
         bail!("Cover art URL is not on a known image host.");
     }
@@ -528,14 +566,14 @@ pub fn fetch_art_bytes(url: &str) -> Result<Vec<u8>> {
         .get("content-length")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > MAX_ART_BYTES)
+        .is_some_and(|length| length > limit)
     {
         bail!("Cover art is too large.");
     }
     response
         .body_mut()
         .with_config()
-        .limit(MAX_ART_BYTES)
+        .limit(limit)
         .read_to_vec()
         .map_err(|_| anyhow!("Could not read cover art."))
 }
@@ -707,6 +745,30 @@ mod tests {
         ] {
             assert!(!safe_art_url(url), "{url}");
         }
+    }
+
+    #[test]
+    fn only_itunes_thumbnails_are_asked_for_a_larger_size() {
+        assert_eq!(
+            large_art_url("https://is1-ssl.mzstatic.com/image/thumb/Music/x.jpg/200x200bb.jpg"),
+            "https://is1-ssl.mzstatic.com/image/thumb/Music/x.jpg/600x600bb.jpg"
+        );
+        assert_eq!(
+            large_art_url("https://IS5-SSL.mzstatic.com/image/thumb/x/200x200bb.png"),
+            "https://IS5-SSL.mzstatic.com/image/thumb/x/600x600bb.png"
+        );
+        for url in [
+            "https://lastfm.freetls.fastly.net/i/u/300x300/200x200bb.png",
+            "https://cdn-images.dzcdn.net/images/cover/abc/250x250-000000-80-0-0.jpg",
+            "https://is1-ssl.mzstatic.com/image/thumb/200x200bb.jpg/100x100bb.jpg",
+            "https://evil.test/is1-ssl.mzstatic.com/200x200bb.jpg",
+            "http://is1-ssl.mzstatic.com/x/200x200bb.jpg",
+        ] {
+            assert_eq!(large_art_url(url), url);
+        }
+        let large =
+            large_art_url("https://is3-ssl.mzstatic.com/image/thumb/Music/x.jpg/200x200bb.jpg");
+        assert!(safe_art_url(&large), "still on the allowlist");
     }
 
     #[test]
