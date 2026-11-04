@@ -33,7 +33,7 @@ pub fn render_update_modal(
             "Unknown".to_string(),
             "New Update Available".to_string(),
             "A new version of Noir Player is available for download.".to_string(),
-            "https://github.com/Abdullah-Masood-05/noir-player-desktop-app/releases".to_string(),
+            "https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases".to_string(),
         ),
     };
 

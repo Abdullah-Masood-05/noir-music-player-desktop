@@ -362,7 +362,7 @@ jobs:
               'Release:        1%{?dist}',
               'Summary:        Noir Player music player',
               'License:        MIT',
-              'URL:            https://github.com/Abdullah-Masood-05/noir-player-desktop-app',
+              'URL:            https://github.com/Abdullah-Masood-05/noir-music-player-desktop',
               'AutoReqProv:    no',
               # Required by soname, not by package name: these libraries are
               # opened at run time, and every RPM distribution advertises the
@@ -462,7 +462,7 @@ jobs:
           compression-level: 0
   release:
     needs: [validate, checks, package]
-    if: github.repository == 'Abdullah-Masood-05/noir-player-desktop-app' && (github.event_name == 'push' || inputs.create_draft)
+    if: github.repository == 'Abdullah-Masood-05/noir-music-player-desktop' && (github.event_name == 'push' || inputs.create_draft)
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -6,8 +6,8 @@ default-run = "noir_player"
 description = "Noir Player - A lightweight music player"
 license = "MIT"
 authors = ["Abdullah Masood <Abdullah-Masood-05@users.noreply.github.com>"]
-repository = "https://github.com/Abdullah-Masood-05/noir-player-desktop-app"
-homepage = "https://github.com/Abdullah-Masood-05/noir-player-desktop-app"
+repository = "https://github.com/Abdullah-Masood-05/noir-music-player-desktop"
+homepage = "https://github.com/Abdullah-Masood-05/noir-music-player-desktop"
 
 [dependencies]
 gpui-kit = "0.6"

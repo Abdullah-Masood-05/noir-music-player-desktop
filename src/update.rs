@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 pub use crate::app::store::InstallPreference;
 
-pub const REPO: &str = "Abdullah-Masood-05/noir-player-desktop-app";
+pub const REPO: &str = "Abdullah-Masood-05/noir-music-player-desktop";
 const USER_AGENT: &str = "NoirPlayer-Desktop";
 /// Largest installer the updater will accept, well above any current asset.
 const MAX_ASSET_BYTES: u64 = 300 * 1024 * 1024;
@@ -2074,7 +2074,7 @@ mod tests {
     #[test]
     fn the_release_repository_override_must_be_owner_and_name() {
         assert!(is_repo_name("someone/noir-player-test"));
-        assert!(is_repo_name("Abdullah-Masood-05/noir-player-desktop-app"));
+        assert!(is_repo_name("Abdullah-Masood-05/noir-music-player-desktop"));
         assert!(is_repo_name("a_b/c.d"));
         for bad in [
             "",

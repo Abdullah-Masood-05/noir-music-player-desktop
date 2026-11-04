@@ -894,7 +894,7 @@ fn build_rows(
                         .on_click(cx.listener(|_, _, _, cx| {
                             cx.stop_propagation();
                             cx.open_url(
-                                "https://github.com/Abdullah-Masood-05/noir-player-desktop-app",
+                                "https://github.com/Abdullah-Masood-05/noir-music-player-desktop",
                             );
                         }))
                         .child(icon_text(MusicIcon::ExternalLink, 13.0))
