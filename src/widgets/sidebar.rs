@@ -6,7 +6,7 @@ use gpui_kit::*;
 use crate::app::{NavDestination, NoirPlayerModel};
 use crate::views::ui::{
     bottom_aura, dynamic_border, dynamic_divider, dynamic_row_hover, dynamic_sidebar,
-    dynamic_subtitle, dynamic_text, icon_text, red, red_a,
+    dynamic_subtitle, dynamic_text, icon_text, img_from_image, red, red_a,
 };
 
 pub const SIDEBAR_WIDTH: f32 = 236.0;
@@ -103,11 +103,16 @@ fn brand(is_light: bool) -> Div {
         .py(px(20.0))
         .gap(px(10.0))
         .items_center()
-        .child(
-            div()
+        .child(match crate::media::app_logo() {
+            Some(logo) => img_from_image(logo)
+                .size(px(30.0))
+                .flex_shrink_0()
+                .into_any_element(),
+            None => div()
                 .text_color(red())
-                .child(icon_text(MusicIcon::AudioLines, 26.0)),
-        )
+                .child(icon_text(MusicIcon::AudioLines, 26.0))
+                .into_any_element(),
+        })
         .child(
             div()
                 .text_lg()

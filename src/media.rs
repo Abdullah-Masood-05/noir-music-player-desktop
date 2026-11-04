@@ -117,6 +117,33 @@ pub fn discover_thumb(bytes: &[u8]) -> Option<Arc<gpui_kit::RenderImage>> {
     ))))
 }
 
+/// Longest edge of the app logo in the sidebar: twice the 30 px it is drawn at.
+const APP_LOGO_EDGE: u32 = 64;
+
+thread_local! {
+    static APP_LOGO: Option<Arc<gpui_kit::RenderImage>> =
+        decode_artwork(include_bytes!("../Noir_Player_Logo.png")).map(|decoded| {
+            let mut logo = fit_within(&decoded, APP_LOGO_EDGE).into_owned();
+            lift_off_tile(&mut logo);
+            Arc::new(render_image(Cow::Owned(logo)))
+        });
+}
+
+/// Makes the logo's dark tile transparent so only the red mark is drawn: grey
+/// and black pixels have no red bias, so their opacity goes to zero.
+fn lift_off_tile(logo: &mut image::RgbaImage) {
+    for pixel in logo.pixels_mut() {
+        let [r, g, b, a] = pixel.0;
+        let redness = f32::from(r.saturating_sub(g.max(b))) / 150.0;
+        pixel.0[3] = (redness.clamp(0.0, 1.0) * f32::from(a)).round() as u8;
+    }
+}
+
+/// The app's logo, decoded once per thread and kept for the life of the app.
+pub fn app_logo() -> Option<Arc<gpui_kit::RenderImage>> {
+    APP_LOGO.with(Clone::clone)
+}
+
 fn decode_artwork(bytes: &[u8]) -> Option<image::RgbaImage> {
     let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -424,9 +451,7 @@ pub fn prepare_discover_audio(
     cancel: &std::sync::atomic::AtomicBool,
     progress: &impl Fn(&str),
 ) -> Result<PreparedAudio> {
-    use lofty::config::WriteOptions;
     use lofty::file::FileType;
-    use lofty::tag::{Tag, TagExt};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     crate::api::check_cancel(cancel)?;
@@ -524,13 +549,28 @@ pub fn prepare_discover_audio(
         FileType::Aiff => "aiff",
         _ => bail!("Downloaded audio uses an unsupported format."),
     };
-    let mut tag = Tag::new(kind.primary_tag_type());
-    tag.set_title(source.name.clone());
-    tag.set_artist(source.artist.clone());
-    tag.save_to_path(&temp.0, WriteOptions::default())
-        .map_err(|_| {
+    // Copied audio already carries the cover this job embedded when it was played.
+    let cover = match cached.and_then(|_| embedded_cover(&temp.0)) {
+        Some(cover) => Some(cover),
+        None => {
+            progress("Fetching cover art...");
+            crate::api::fetch_cover_art(source)
+        }
+    };
+    crate::api::check_cancel(cancel)?;
+    progress("Saving metadata...");
+    let tagged = cover
+        .as_deref()
+        .and_then(cover_picture)
+        .is_some_and(|picture| {
+            write_discover_tags(&temp.0, kind, &source.name, &source.artist, Some(picture)).is_ok()
+        });
+    // Art is a nicety: a song whose cover would not embed is saved without one.
+    if !tagged {
+        write_discover_tags(&temp.0, kind, &source.name, &source.artist, None).map_err(|_| {
             anyhow!("Could not preserve title and artist in downloaded audio metadata.")
         })?;
+    }
     let duration = decoded_duration(&temp.0)
         .map_err(|_| anyhow!("Audio validation failed after writing metadata."))?;
     let mut track =
@@ -557,6 +597,78 @@ pub fn prepare_discover_audio(
     };
     crate::api::check_cancel(cancel)?;
     Ok(prepared)
+}
+
+/// Writes the title, artist and (when given) front cover into a downloaded
+/// song, replacing the tag of the format's usual kind.
+fn write_discover_tags(
+    path: &Path,
+    kind: lofty::file::FileType,
+    title: &str,
+    artist: &str,
+    cover: Option<lofty::picture::Picture>,
+) -> Result<()> {
+    use lofty::config::WriteOptions;
+    use lofty::file::FileType;
+    use lofty::tag::{Tag, TagExt, TagType};
+
+    let mut tag = Tag::new(kind.primary_tag_type());
+    tag.set_title(title.to_owned());
+    tag.set_artist(artist.to_owned());
+    let mut pictured = None;
+    if let Some(cover) = cover {
+        // RIFF INFO, WAV's usual tag, has no pictures; WAV also carries ID3v2,
+        // which every player that shows WAV art reads.
+        if kind == FileType::Wav {
+            let mut id3 = Tag::new(TagType::Id3v2);
+            id3.set_title(title.to_owned());
+            id3.set_artist(artist.to_owned());
+            id3.push_picture(cover);
+            pictured = Some(id3);
+        } else {
+            tag.push_picture(cover);
+        }
+    }
+    tag.save_to_path(path, WriteOptions::default())?;
+    if let Some(id3) = pictured {
+        id3.save_to_path(path, WriteOptions::default())?;
+    }
+    Ok(())
+}
+
+/// The cover to embed, if `bytes` is a JPEG or PNG of sane dimensions.
+fn cover_picture(bytes: &[u8]) -> Option<lofty::picture::Picture> {
+    use lofty::picture::{MimeType, Picture};
+
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if width == 0 || height == 0 || width.max(height) > 4096 {
+        return None;
+    }
+    let mut picture = Picture::from_reader(&mut &bytes[..]).ok()?;
+    if !matches!(picture.mime_type(), Some(MimeType::Jpeg | MimeType::Png)) {
+        return None;
+    }
+    picture.set_pic_type(PictureType::CoverFront);
+    Some(picture)
+}
+
+/// The front cover already embedded in `path`, if any.
+fn embedded_cover(path: &Path) -> Option<Vec<u8>> {
+    let tagged = Probe::open(path)
+        .ok()?
+        .options(ParseOptions::new().parsing_mode(ParsingMode::Relaxed))
+        .read()
+        .ok()?;
+    tagged
+        .tags()
+        .iter()
+        .flat_map(|tag| tag.pictures())
+        .find(|picture| picture.pic_type() == PictureType::CoverFront)
+        .map(|picture| picture.data().to_vec())
 }
 
 fn scan_folder_inner(folder: &Path, sort: bool) -> ScanResult {
@@ -832,14 +944,18 @@ fn read_track_with_added(path: &Path, added_hint: Option<std::time::SystemTime>)
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.into_owned())
         .unwrap_or_else(|| "Unknown Album".to_owned());
+    let cover_of = |tag: &lofty::tag::Tag| {
+        tag.pictures()
+            .iter()
+            .find(|picture| picture.pic_type() == PictureType::CoverFront)
+            .or_else(|| tag.pictures().first())
+            .map(|picture| Arc::from(picture.data()))
+    };
+    // A WAV's usual tag (RIFF INFO) cannot hold pictures, so its cover lives in
+    // the ID3v2 tag beside it.
     let artwork: Option<Arc<[u8]>> = tag
-        .and_then(|tag| {
-            tag.pictures()
-                .iter()
-                .find(|picture| picture.pic_type() == PictureType::CoverFront)
-                .or_else(|| tag.pictures().first())
-        })
-        .map(|picture| Arc::from(picture.data()));
+        .and_then(cover_of)
+        .or_else(|| tagged.tags().iter().find_map(cover_of));
     let year = tag.and_then(|tag| tag.year()).filter(|year| *year > 0);
 
     let search_key = Track::build_search_key(&title, &artist, &album);
@@ -2408,6 +2524,60 @@ mod tests {
     fn sweeping_a_folder_that_is_not_there_is_not_an_error() {
         let temp = TempDir::new();
         assert_eq!(sweep_abandoned(&temp.0.join("missing"), Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn discover_covers_are_embedded_as_the_front_cover_and_read_back() {
+        use lofty::file::FileType;
+        use lofty::picture::MimeType;
+
+        let temp = TempDir::new();
+        let art = encoded_artwork(64, 64);
+        let mp3 = temp.0.join("song.mp3");
+        write_tagged_mp3(&mp3, b"2024");
+        let wav = temp.0.join("song.wav");
+        write_wav(&wav);
+        for (path, kind) in [(&mp3, FileType::Mpeg), (&wav, FileType::Wav)] {
+            let picture = cover_picture(&art).expect("PNG art is accepted");
+            write_discover_tags(path, kind, "Song", "Artist", Some(picture)).unwrap();
+
+            let tagged = lofty::read_from_path(path).unwrap();
+            let picture = tagged
+                .tags()
+                .iter()
+                .flat_map(|tag| tag.pictures())
+                .next()
+                .expect("a picture is embedded");
+            assert_eq!(picture.pic_type(), PictureType::CoverFront);
+            assert_eq!(picture.mime_type(), Some(&MimeType::Png));
+            assert_eq!(picture.data(), &art[..]);
+            assert_eq!(embedded_cover(path).as_deref(), Some(&art[..]));
+
+            let track = read_track(path).unwrap();
+            assert_eq!(
+                (track.title.as_str(), track.artist.as_str()),
+                ("Song", "Artist")
+            );
+            assert!(
+                track.artwork_image.is_some(),
+                "{kind:?} track shows its cover"
+            );
+            assert!(track.artwork.is_some());
+        }
+    }
+
+    #[test]
+    fn songs_without_usable_art_are_tagged_without_a_cover() {
+        assert!(cover_picture(b"<html>not an image</html>").is_none());
+        assert!(cover_picture(&[]).is_none());
+        let temp = TempDir::new();
+        let mp3 = temp.0.join("plain.mp3");
+        write_tagged_mp3(&mp3, b"2024");
+        write_discover_tags(&mp3, lofty::file::FileType::Mpeg, "Song", "Artist", None).unwrap();
+        assert!(embedded_cover(&mp3).is_none());
+        let track = read_track(&mp3).unwrap();
+        assert_eq!(track.title, "Song");
+        assert!(track.artwork_image.is_none());
     }
 
     fn encoded_artwork(width: u32, height: u32) -> Arc<[u8]> {
