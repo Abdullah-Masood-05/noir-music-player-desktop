@@ -4,7 +4,9 @@ Release notes are scoped to the version in `Cargo.toml`. A section here does not
 
 ## [Unreleased]
 
-Discover now finds and downloads your songs right on your computer.
+## [2.5.0]
+
+Version 2.5.0 finds and downloads Discover songs right on your computer.
 
 ### Improvements
 
