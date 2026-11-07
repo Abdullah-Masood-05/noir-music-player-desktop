@@ -77,63 +77,47 @@ Switch themes inside **Settings** (`Ctrl+,`), which also manages library scan fo
 | `Ctrl+E` / `Cmd+E` | Open / close 5-Band Graphic Equalizer |
 | `Escape` | Dismiss open dialogs, settings, or equalizer |
 
-## Discover and API configuration
+## Discover
 
-Local playback does not need API keys, and neither does Discover. Discover
-calls three services, and by default it reaches all of them through Noir
-Player's backend at `https://noir-player-api.vercel.app`, which holds the keys.
+Discover needs nothing to be set up.
 
-| Service | Used for | Backend endpoint |
-| --- | --- | --- |
-| Last.fm | Top tracks and track search, up to 30 results | `/api/tracks`, `/api/tracks?q=` |
-| YouTube Data API v3 | The first video matching a song's title and artist | `/api/video?q=` |
-| RapidAPI `youtube-mp36` | A download link for that video's audio | `/api/resolve?id=` |
+- **Charts and search** come from Last.fm through Noir Player's server
+  (`https://noir-player-api.vercel.app`). Settings → Discover also takes your
+  own Last.fm key, which calls Last.fm directly on your own quota. For
+  development, `LASTFM_API_KEY` in the environment or in a `.env` found from
+  the working directory (see `.env.example`) does the same. `NOIR_API_BASE`
+  points the app at another HTTPS deployment of the backend in `backend/`.
+- **Finding and downloading the audio happens on your computer** with
+  [yt-dlp](https://github.com/yt-dlp/yt-dlp). Noir Player downloads yt-dlp the
+  first time you play or download a song (about 24 MB), checks it, and keeps it
+  up to date. It looks on YouTube Music first, so you get the official audio
+  rather than a video's soundtrack.
+- **Format.** Songs are saved in their original quality as M4A. Settings →
+  Discover → Download Format can switch to MP3 for older players and car
+  stereos; the first MP3 download fetches a small converter (about 6 MB). MP3
+  isn't offered on Intel Macs.
+- **Tags and cover.** The title, artist and cover art are written into the
+  file.
+- **Errors** are written in plain language, with a short technical reason at
+  the end.
 
-The audio itself is always downloaded straight from the link the service
-returns; it never passes through the backend.
+The downloaded helper programs are listed, with their licences, in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-**Using your own keys.** Settings → Discover takes a key for each service. Any
-service you give a key is called directly, on your own quota; the rest still go
-through the backend. Keys are stored with the app's other settings. For YouTube,
-enable YouTube Data API v3 on the Google Cloud project; for RapidAPI, the
-account needs a subscription to the `youtube-mp36` service specifically.
+Play downloads and validates the complete audio file into a local cache before
+playback; it is not streaming. Download saves audio to the configured download
+folder (the system Music folder by default, or choose one in Settings). A
+prepared cached copy is reused. The first result can be the wrong recording, and
+availability is not guaranteed. Only download audio you are permitted to
+download and follow the providers' terms.
 
-For development, `LASTFM_API_KEY`, `YOUTUBE_API_KEY` and `RAPIDAPI_KEY` in the
-environment, or in a `.env` found from the working directory (see
-`.env.example`), fill in any key left empty in Settings. `NOIR_API_BASE` points
-the app at another HTTPS deployment of the backend.
+Download destinations must support hard links, allow writing and have no linked
+directory components. These restrictions can reject redirected home folders,
+removable filesystems or network storage. Validation rejects unsupported audio
+and files longer than three hours.
 
-**The backend** lives in `backend/` and deploys to Vercel. Its keys are
-environment variables on the Vercel project, stored as secrets:
-
-```sh
-cd backend
-bun install
-vercel env add LASTFM_API_KEY production --sensitive
-vercel env add YOUTUBE_API_KEY production --sensitive
-vercel env add RAPIDAPI_KEY production --sensitive
-vercel deploy --prod
-```
-
-`/api/health` reports which keys a deployment has, without calling any
-service. The endpoints accept only what the app sends, so the keys can't be
-spent on arbitrary requests through them. Anyone can still call the endpoints
-the way the app does, so the keys' quotas are shared by everyone using a
-release. YouTube searches are cached for a day because each costs 100 of the
-10,000 quota units a key gets daily.
-
-Do not commit `.env`, attach it to bug reports or put keys in Cargo metadata.
-The workflows reject a tracked root `.env` without reading it.
-
-Discover Play downloads and validates the complete audio file into a local cache before playback. It is not streaming. Download saves audio to the configured download folder (defaults to the system Music folder, or customizable in Settings) and writes the discovered title and artist into its tags. A prepared cached copy can be reused. The first YouTube result can be the wrong recording; neither matching nor service availability is guaranteed. Only download audio you are permitted to download and follow the providers' terms.
-
-### Quotas and service failures
-
-Each uncached audio resolution makes one YouTube `search.list` call and up to four RapidAPI requests, with two-second waits while processing. Last.fm search and chart requests also consume service quota. Repeated retries can exhaust quotas or incur charges under your plan. The app does not track remaining quota or enforce a spending cap.
-
-[Google's current quota documentation](https://developers.google.com/youtube/v3/determine_quota_cost) lists a default separate limit of 100 `search.list` calls per day, at one quota per call, resetting at midnight Pacific Time. Provider rules change; check your project's actual quota rather than assuming the older 100-unit search pricing. Last.fm limits and RapidAPI quotas, rate limits and prices depend on provider policy and your account. No free or unlimited access is promised.
-
-Missing keys, rejected requests, exhausted quota and malformed responses are shown as errors. Audio transfers are limited to 100 MiB and 180 seconds, with at most five redirects. Validation rejects unsupported audio, more than three hours of samples, and decoding that exceeds its validation deadline. Download destinations must support hard links, allow writing and have no linked directory components. These restrictions can reject redirected home folders, removable filesystems or network storage.
+Do not commit `.env` or attach it to bug reports. The workflows reject a
+tracked root `.env` without reading it.
 
 ## Local data
 

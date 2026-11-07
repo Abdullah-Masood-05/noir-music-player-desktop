@@ -575,7 +575,7 @@ pub fn ensure_ytdlp(progress: &dyn Fn(&str), cancel: &AtomicBool) -> Result<Path
     if path.is_file() {
         return Ok(path);
     }
-    progress("Setting up the audio downloader (first time only)...");
+    progress("Getting the YouTube downloader (about 24 MB, first time only)...");
     let install = || -> Result<()> {
         let tag = latest_ytdlp_tag(cancel)?;
         let temp = fetch_ytdlp(&tag, &path, progress, cancel)?;

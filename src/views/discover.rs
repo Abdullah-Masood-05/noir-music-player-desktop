@@ -23,6 +23,8 @@ pub fn render_discover(model: &mut NoirPlayerModel, cx: &mut Context<NoirPlayerM
     } else if let Some(error) = &model.discover_error {
         div()
             .p_4()
+            .w_full()
+            .whitespace_normal()
             .text_color(red())
             .child(error.clone())
             .into_any_element()
@@ -217,7 +219,14 @@ pub fn render_discover(model: &mut NoirPlayerModel, cx: &mut Context<NoirPlayerM
                         })
                 }))
                 .children(model.discover_audio_error.clone().map(|error| {
-                    div().px_4().py_2().text_sm().text_color(red()).child(error)
+                    div()
+                        .px_4()
+                        .py_2()
+                        .w_full()
+                        .whitespace_normal()
+                        .text_sm()
+                        .text_color(red())
+                        .child(error)
                 }))
                 .child(crate::views::ui::smooth_scroll(
                     "discover-results",

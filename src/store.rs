@@ -38,14 +38,10 @@ pub struct Store {
     pub volume: f32,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
-    /// Discover keys entered in Settings. Empty means that service goes
-    /// through Noir Player's backend rather than being called directly.
+    /// The Last.fm key entered in Settings. Empty means Discover goes
+    /// through Noir Player's server rather than calling Last.fm directly.
     #[serde(default)]
     pub lastfm_api_key: String,
-    #[serde(default)]
-    pub youtube_api_key: String,
-    #[serde(default)]
-    pub rapidapi_key: String,
     /// What Discover saves: the original M4A from YouTube, or an MP3
     /// converted on this computer. Saved as "original" or "mp3".
     #[serde(default, deserialize_with = "crate::ytdlp::AudioFormat::lenient")]
@@ -193,8 +189,6 @@ impl Default for Store {
             volume: 0.9,
             auto_check_updates: true,
             lastfm_api_key: String::new(),
-            youtube_api_key: String::new(),
-            rapidapi_key: String::new(),
             discover_format: crate::ytdlp::AudioFormat::Original,
             shuffle: false,
             repeat: RepeatMode::Off,
@@ -583,19 +577,24 @@ mod tests {
         // A settings file from before keys could be entered in the app.
         let older: Store = serde_json::from_str(r#"{"playlists":[],"favourites":[]}"#).unwrap();
         assert!(older.lastfm_api_key.is_empty());
-        assert!(older.youtube_api_key.is_empty());
-        assert!(older.rapidapi_key.is_empty());
 
         let temp = TempDir::new();
         let path = temp.0.join("keys.json");
         let saved = Store {
             lastfm_api_key: "lastfm-key".into(),
-            youtube_api_key: "youtube-key".into(),
-            rapidapi_key: "rapidapi-key".into(),
             ..Store::default()
         };
         saved.save(&path).unwrap();
         assert_eq!(Store::load(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn a_settings_file_with_fields_since_dropped_still_loads() {
+        let older: Store = serde_json::from_str(
+            r#"{"playlists":[],"favourites":[],"lastfm_api_key":"k","youtube_api_key":"y","rapidapi_key":"r"}"#,
+        )
+        .unwrap();
+        assert_eq!(older.lastfm_api_key, "k");
     }
 
     #[test]

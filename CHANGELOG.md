@@ -4,6 +4,24 @@ Release notes are scoped to the version in `Cargo.toml`. A section here does not
 
 ## [Unreleased]
 
+Discover now finds and downloads your songs right on your computer.
+
+### Improvements
+
+- **More Reliable Discover Downloads**: Finding and downloading a song happens
+  on your computer, so it works more steadily and has no daily limits. The
+  first time, Noir Player fetches the small helper it needs and keeps it up to
+  date.
+- **Official Audio First**: Discover looks on YouTube Music first, so you get
+  the song's official audio.
+- **Original Quality, or MP3**: Songs are saved as M4A in their original
+  quality. Settings, then Discover lets you choose MP3 instead for older players
+  and car stereos.
+- **Covers and Tags Inside the File**: Every download carries its title,
+  artist and cover art.
+- **Plain-Language Messages**: When a song can't be downloaded, Discover says
+  what happened in everyday words.
+
 ## [2.4.4]
 
 Version 2.4.4 keeps Discover covers with your songs and makes the keyboard

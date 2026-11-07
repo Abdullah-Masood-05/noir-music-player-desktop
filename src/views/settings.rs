@@ -758,56 +758,87 @@ fn build_rows(
     // ── Discover rows ───────────────────────────────────────────────────────────
     let dc_visible = cat == SettingsCategory::All || cat == SettingsCategory::Discover;
     let dc_match = query.is_empty()
-        || "discover api key keys own lastfm last.fm youtube rapidapi server quota".contains(query);
+        || "discover download format m4a mp3 original quality api key own lastfm last.fm server"
+            .contains(query);
 
     if dc_visible && dc_match {
+        let active = idx == selected;
+        let mp3_unavailable = crate::tools::mp3_supported()
+            .err()
+            .map(|_| "MP3 isn't available on this computer yet. Original (M4A) works everywhere.");
+        rows.push(
+            row_base(idx, active, is_light, cx)
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(10.0))
+                        .child(label_cell(
+                            "Download Format",
+                            "What Discover saves when you download a song.",
+                            is_light,
+                        ))
+                        .child(format_choice(
+                            "discover-format-original",
+                            "Original (M4A)",
+                            "Best quality, smaller files. Plays in almost every app and device.",
+                            model.store.discover_format == crate::ytdlp::AudioFormat::Original,
+                            true,
+                            idx,
+                            crate::ytdlp::AudioFormat::Original,
+                            is_light,
+                            cx,
+                        ))
+                        .child(format_choice(
+                            "discover-format-mp3",
+                            "MP3 (most compatible)",
+                            mp3_unavailable.unwrap_or(
+                                "For older players and car stereos. Same sound quality, larger files.                                  Downloads a small converter (about 6 MB) the first time.",
+                            ),
+                            model.store.discover_format == crate::ytdlp::AudioFormat::Mp3
+                                && mp3_unavailable.is_none(),
+                            mp3_unavailable.is_none(),
+                            idx,
+                            crate::ytdlp::AudioFormat::Mp3,
+                            is_light,
+                            cx,
+                        )),
+                )
+                .into_any_element(),
+        );
+        idx += 1;
+
         let active = idx == selected;
         rows.push(
             row_base(idx, active, is_light, cx)
                 .child(label_cell(
-                    "Your Own API Keys",
-                    "Optional. Discover works without these through Noir Player's server. \
-                     A key you add here calls that service directly, on your own quota.",
+                    "Your Own Last.fm Key",
+                    "Optional. Trending and search work without it through Noir Player's server.                      A key you add here calls Last.fm directly, on your own quota.",
                     is_light,
                 ))
                 .into_any_element(),
         );
         idx += 1;
 
-        let fields = [
-            (
-                model.lastfm_key_input.clone(),
-                "Last.fm API Key",
-                "Trending and search. Free at last.fm/api.",
-            ),
-            (
-                model.youtube_key_input.clone(),
-                "YouTube Data API Key",
-                "Finds each song's video. From the Google Cloud console.",
-            ),
-            (
-                model.rapidapi_key_input.clone(),
-                "RapidAPI Key",
-                "Converts the video to audio, via YouTube MP3 on RapidAPI.",
-            ),
-        ];
-        for (input, title, subtitle) in fields {
-            let active = idx == selected;
-            rows.push(
-                row_base(idx, active, is_light, cx)
-                    .justify_between()
-                    .gap(px(12.0))
-                    .child(label_cell(title, subtitle, is_light))
-                    .child(
-                        div()
-                            .w(px(280.0))
-                            .flex_shrink_0()
-                            .child(Input::new(&input).mask_toggle().cleanable(true)),
-                    )
-                    .into_any_element(),
-            );
-            idx += 1;
-        }
+        let active = idx == selected;
+        rows.push(
+            row_base(idx, active, is_light, cx)
+                .justify_between()
+                .gap(px(12.0))
+                .child(label_cell(
+                    "Last.fm API Key",
+                    "Trending and search. Free at last.fm/api.",
+                    is_light,
+                ))
+                .child(
+                    div().w(px(280.0)).flex_shrink_0().child(
+                        Input::new(&model.lastfm_key_input)
+                            .mask_toggle()
+                            .cleanable(true),
+                    ),
+                )
+                .into_any_element(),
+        );
+        idx += 1;
     }
 
     // ── About rows ──────────────────────────────────────────────────────────────
@@ -1222,6 +1253,70 @@ fn row_base(
             this.settings_selected_index = idx;
             cx.notify();
         }))
+}
+
+/// One choice in the Discover download format: a selectable card with a
+/// title and a plain-language line. A choice that can't be used is dimmed
+/// and says why.
+#[allow(clippy::too_many_arguments)]
+fn format_choice(
+    id: &'static str,
+    title: &'static str,
+    detail: &'static str,
+    selected: bool,
+    enabled: bool,
+    row_idx: usize,
+    format: crate::ytdlp::AudioFormat,
+    is_light: bool,
+    cx: &mut Context<NoirPlayerModel>,
+) -> Stateful<Div> {
+    let card = div()
+        .id(id)
+        .w_full()
+        .px(px(12.0))
+        .py(px(9.0))
+        .rounded_lg()
+        .border_1()
+        .border_color(if selected {
+            red()
+        } else if is_light {
+            c(0xE4E4E7)
+        } else {
+            white(0.1)
+        })
+        .bg(if selected {
+            red().opacity(0.12)
+        } else {
+            gpui::transparent_black()
+        })
+        .child(
+            v_flex()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(if is_light { c(0x18181B) } else { white(0.95) })
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if is_light { c(0x71717A) } else { white(0.6) })
+                        .child(detail),
+                ),
+        );
+    if enabled {
+        card.cursor_pointer()
+            .hover(|s| s.opacity(0.85))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.settings_selected_index = row_idx;
+                this.set_discover_format(format, cx);
+            }))
+    } else {
+        card.opacity(0.5)
+    }
 }
 
 fn label_cell(title: &str, subtitle: &str, is_light: bool) -> Div {

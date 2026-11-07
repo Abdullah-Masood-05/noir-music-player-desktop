@@ -240,8 +240,6 @@ const VOLUME_HUD_DURATION: Duration = Duration::from_millis(1500);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiKeyField {
     LastFm,
-    YouTube,
-    RapidApi,
 }
 
 pub struct NoirPlayerModel {
@@ -321,12 +319,10 @@ pub struct NoirPlayerModel {
     pub equalizer_focus_handle: FocusHandle,
     pub settings_category: crate::views::settings::SettingsCategory,
     pub settings_search: Entity<InputState>,
-    /// The Discover key inputs in Settings. Empty means that service goes
-    /// through Noir Player's backend.
+    /// The Last.fm key input in Settings. Empty means Discover goes through
+    /// Noir Player's server.
     pub lastfm_key_input: Entity<InputState>,
-    pub youtube_key_input: Entity<InputState>,
-    pub rapidapi_key_input: Entity<InputState>,
-    /// A key has been edited but not written yet. Keys are written once the
+    /// The key has been edited but not written yet. Keys are written once the
     /// field is left rather than on every keystroke.
     api_keys_dirty: bool,
     pub settings_selected_index: usize,
@@ -370,21 +366,10 @@ impl NoirPlayerModel {
         let settings_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Select an option..."));
         let lastfm_key_input = Self::api_key_input(&store.lastfm_api_key, window, cx);
-        let youtube_key_input = Self::api_key_input(&store.youtube_api_key, window, cx);
-        let rapidapi_key_input = Self::api_key_input(&store.rapidapi_key, window, cx);
         let subscriptions = vec![
             cx.subscribe(&lastfm_key_input, |this, input, event: &InputEvent, cx| {
                 this.api_key_event(ApiKeyField::LastFm, &input, event, cx)
             }),
-            cx.subscribe(&youtube_key_input, |this, input, event: &InputEvent, cx| {
-                this.api_key_event(ApiKeyField::YouTube, &input, event, cx)
-            }),
-            cx.subscribe(
-                &rapidapi_key_input,
-                |this, input, event: &InputEvent, cx| {
-                    this.api_key_event(ApiKeyField::RapidApi, &input, event, cx)
-                },
-            ),
             cx.subscribe(&library_search, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&discover_search, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -466,8 +451,6 @@ impl NoirPlayerModel {
             settings_category: crate::views::settings::SettingsCategory::All,
             settings_search,
             lastfm_key_input,
-            youtube_key_input,
-            rapidapi_key_input,
             api_keys_dirty: false,
             settings_selected_index: 0,
             update_status: crate::update::UpdateStatus::Idle,
@@ -1580,8 +1563,6 @@ impl NoirPlayerModel {
                 let value = input.read(cx).value().trim().to_owned();
                 let saved = match field {
                     ApiKeyField::LastFm => &mut self.store.lastfm_api_key,
-                    ApiKeyField::YouTube => &mut self.store.youtube_api_key,
-                    ApiKeyField::RapidApi => &mut self.store.rapidapi_key,
                 };
                 if *saved != value {
                     *saved = value;
@@ -1601,13 +1582,23 @@ impl NoirPlayerModel {
     }
 
     fn api_key_input_focused(&self, window: &Window, cx: &App) -> bool {
-        [
-            &self.lastfm_key_input,
-            &self.youtube_key_input,
-            &self.rapidapi_key_input,
-        ]
-        .iter()
-        .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        self.lastfm_key_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    }
+
+    /// Chooses what Discover downloads and saves it.
+    pub fn set_discover_format(
+        &mut self,
+        format: crate::ytdlp::AudioFormat,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.discover_format != format {
+            self.store.discover_format = format;
+            self.save_current_store(cx);
+        }
+        cx.notify();
     }
 
     pub fn toggle_settings(&mut self, cx: &mut Context<Self>) {
@@ -2003,14 +1994,7 @@ impl NoirPlayerModel {
 
         if let Some(job) = &self.discover_audio_job {
             if let Ok(progress) = job.progress.lock() {
-                let next = format!(
-                    "{}: {progress}",
-                    if job.preparing {
-                        "Preparing audio"
-                    } else {
-                        "Download"
-                    },
-                );
+                let next = progress.clone();
                 if self.discover_audio_status.as_deref() != Some(next.as_str()) {
                     self.discover_audio_status = Some(next);
                     dirty = true;
