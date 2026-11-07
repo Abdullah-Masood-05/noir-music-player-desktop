@@ -559,7 +559,7 @@ fn collection_detail(
 
 /// Greeting banner with the library totals.
 fn hero(model: &NoirPlayerModel, is_light: bool) -> Div {
-    let songs = model.tracks.len();
+    let songs = model.library_len();
     let albums = model.albums.len();
     let artists = model.artists.len();
     let playing = model.is_playing;

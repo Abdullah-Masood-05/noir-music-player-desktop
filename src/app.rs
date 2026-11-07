@@ -975,7 +975,11 @@ impl NoirPlayerModel {
             .iter()
             .filter_map(|&index| self.tracks.get(index).map(|track| track.path.clone()))
             .collect();
-        self.status = format!("{} songs", tracks.len()).into();
+        let listed = tracks
+            .iter()
+            .filter(|track| !media::is_discover_preview(&track.path))
+            .count();
+        self.status = format!("{listed} songs").into();
         if !errors.is_empty() {
             self.error = Some(format!(
                 "{} scan error(s): {}",
@@ -988,6 +992,9 @@ impl NoirPlayerModel {
         let mut artist_groups: std::collections::HashMap<&str, Vec<usize>> =
             std::collections::HashMap::with_capacity(tracks.len());
         for (i, track) in tracks.iter().enumerate() {
+            if media::is_discover_preview(&track.path) {
+                continue;
+            }
             album_groups
                 .entry(track.album.as_str())
                 .or_default()
@@ -1196,6 +1203,22 @@ impl NoirPlayerModel {
         store::resolve_paths(&self.store.recently_played, &self.tracks)
     }
 
+    /// Indices of the songs that belong to the library. Discover previews
+    /// share `tracks` so they can be played, but are never listed.
+    pub fn library_indices(&self) -> Vec<usize> {
+        (0..self.tracks.len())
+            .filter(|&index| !media::is_discover_preview(&self.tracks[index].path))
+            .collect()
+    }
+
+    /// How many songs the library lists.
+    pub fn library_len(&self) -> usize {
+        self.tracks
+            .iter()
+            .filter(|track| !media::is_discover_preview(&track.path))
+            .count()
+    }
+
     /// The indices backing the selected sidebar destination, before the search
     /// and the sort order are applied.
     pub fn tab_indices(&self) -> Vec<usize> {
@@ -1203,10 +1226,12 @@ impl NoirPlayerModel {
             LibraryTab::Favourites => store::resolve_paths(&self.store.favourites, &self.tracks),
             LibraryTab::RecentlyPlayed => self.recently_played_indices(),
             _ => match self.selected_folder_filter.as_ref() {
-                Some(folder) => (0..self.tracks.len())
+                Some(folder) => self
+                    .library_indices()
+                    .into_iter()
                     .filter(|&index| self.tracks[index].path.starts_with(folder))
                     .collect(),
-                None => (0..self.tracks.len()).collect(),
+                None => self.library_indices(),
             },
         }
     }
@@ -2046,7 +2071,15 @@ impl NoirPlayerModel {
 
     pub fn play_index(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.load_index(index, cx) {
-            self.queue = (0..self.tracks.len()).collect();
+            self.queue = if self
+                .tracks
+                .get(index)
+                .is_some_and(|t| media::is_discover_preview(&t.path))
+            {
+                vec![index]
+            } else {
+                self.library_indices()
+            };
         }
     }
 
@@ -2083,7 +2116,7 @@ impl NoirPlayerModel {
             return;
         };
         if self.cue_index(index, cx) {
-            self.queue = (0..self.tracks.len()).collect();
+            self.queue = self.library_indices();
         }
     }
 

@@ -286,6 +286,16 @@ fn discover_cache_folder() -> Option<PathBuf> {
     Some(dirs::cache_dir()?.join("noir-player").join("discover"))
 }
 
+/// Whether `path` is a Discover preview: a play-cache file, which can be
+/// played but is never a song of the library.
+pub fn is_discover_preview(path: &Path) -> bool {
+    static FOLDER: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FOLDER
+        .get_or_init(discover_cache_folder)
+        .as_deref()
+        .is_some_and(|folder| path.starts_with(folder))
+}
+
 /// How old a leftover preview has to be before it is treated as abandoned.
 /// Previews are deleted as the app exits, so anything this old belongs to a
 /// session that was killed or crashed.
@@ -2078,6 +2088,20 @@ fn decode_file(path: &Path) -> Result<Decoder<BufReader<File>>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn play_cache_files_are_previews_and_music_files_are_not() {
+        let cache = discover_cache_folder().unwrap();
+        assert!(is_discover_preview(&cache.join("Artist - Song.m4a")));
+        assert!(!is_discover_preview(
+            &cache.parent().unwrap().join("Artist - Song.m4a")
+        ));
+        assert!(!is_discover_preview(
+            &default_music_folder()
+                .unwrap_or_default()
+                .join("Artist - Song.m4a")
+        ));
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};

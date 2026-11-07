@@ -436,15 +436,84 @@ fn make_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Turns the technical reason a tool could not be set up into a short
+/// sentence a person can act on, with the reason last in brackets.
+pub fn friendly_tool_error(label: &str, raw: &str) -> String {
+    let text = raw.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| text.contains(n));
+    let message = if has(&[
+        "no space left",
+        "os error 112",
+        "disk full",
+        "not enough space",
+    ]) {
+        format!("Noir Player couldn't set up {label} because the disk is full. Free some space and try again.")
+    } else if has(&["published checksum", "did not match"]) {
+        format!("Noir Player downloaded {label} but it didn't pass its safety check, so it was discarded. Try again in a while.")
+    } else if has(&[
+        "isn't available for this computer",
+        "isn't available on intel",
+    ]) {
+        format!("{} isn't available for this computer.", capitalized(label))
+    } else if has(&[
+        "tools folder",
+        "could not write",
+        "could not save",
+        "access is denied",
+        "permission denied",
+        "os error 5)",
+        "os error 183",
+        "os error 123",
+        "read-only",
+        "cannot create a file",
+        "not a directory",
+        "os error 267",
+        "os error 3)",
+    ]) {
+        format!("Noir Player couldn't set up {label} because it can't write to its tools folder.")
+    } else if has(&[
+        "github did not name",
+        "no checksum",
+        "http 403",
+        "http 429",
+        "http 5",
+    ]) {
+        format!("GitHub isn't giving Noir Player {label} right now. Try again in a few minutes.")
+    } else if has(&[
+        "could not reach",
+        "interrupted",
+        "empty or incomplete",
+        "larger than expected",
+        "redirect",
+        "http ",
+        "timed out",
+    ]) {
+        format!("Noir Player couldn't download {label}. Check your connection and try again.")
+    } else {
+        format!("Noir Player couldn't set up {label}.")
+    };
+    let reason = raw.trim();
+    if reason.is_empty() || message.ends_with("available for this computer.") {
+        message
+    } else {
+        format!("{message} ({reason})")
+    }
+}
+
 fn download_error(tool: Tool, error: anyhow::Error) -> anyhow::Error {
     if error.to_string().contains("cancelled") {
         return error;
     }
-    anyhow!(
-        "Couldn't download {}. Check your connection and try again. ({})",
-        tool.label(),
-        error
-    )
+    anyhow!(friendly_tool_error(tool.label(), &format!("{error:#}")))
+}
+
+fn create_tools_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).map_err(|e| {
+        anyhow!(friendly_tool_error(
+            "its YouTube downloader",
+            &format!("tools folder {}: {e}", dir.display())
+        ))
+    })
 }
 
 // ---- yt-dlp ----
@@ -560,8 +629,7 @@ fn update_ytdlp(dir: &Path) -> Result<()> {
 /// The path of yt-dlp, downloading it first when this is the first use.
 pub fn ensure_ytdlp(progress: &dyn Fn(&str), cancel: &AtomicBool) -> Result<PathBuf> {
     let dir = tools_dir()?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| anyhow!("Couldn't create the tools folder {}: {e}", dir.display()))?;
+    create_tools_dir(&dir)?;
     clean_leftovers(&dir);
     apply_staged(&dir);
     let path = dir.join(Tool::YtDlp.file_name());
@@ -607,8 +675,7 @@ fn ensure_pinned(
 ) -> Result<PathBuf> {
     let asset = asset_here(tool)?;
     let dir = tools_dir()?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| anyhow!("Couldn't create the tools folder {}: {e}", dir.display()))?;
+    create_tools_dir(&dir)?;
     let path = dir.join(tool.file_name());
     static INSTALL: Mutex<()> = Mutex::new(());
     let _guard = INSTALL.lock().unwrap_or_else(|e| e.into_inner());
@@ -684,6 +751,33 @@ pub fn ensure_quickjs(progress: &dyn Fn(&str), cancel: &AtomicBool) -> Result<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_errors_are_plain_language() {
+        let f = |raw: &str| friendly_tool_error("the YouTube downloader", raw);
+        let m = f(
+            r"tools folder C:.txt	ools: Cannot create a file when that file already exists. (os error 183)",
+        );
+        assert!(m.starts_with("Noir Player couldn't set up the YouTube downloader because it can't write to its tools folder."));
+        assert!(m.ends_with("(os error 183))"));
+        assert!(f("could not write x: Access is denied. (os error 5)").contains("can't write"));
+        assert!(f(
+            "could not save the file: There is not enough space on the disk. (os error 112)"
+        )
+        .contains("disk is full"));
+        assert!(
+            f("the file did not match its published checksum, so it was discarded")
+                .contains("safety check")
+        );
+        assert!(f("could not reach github.com: timed out").contains("Check your connection"));
+        assert!(f("HTTP 503").contains("GitHub isn't giving"));
+        assert!(f("GitHub did not name the latest release").contains("GitHub isn't giving"));
+        assert!(
+            f("YouTube downloader isn't available for this computer (x y).")
+                .starts_with("The YouTube downloader isn't available")
+        );
+        assert!(f("weird").starts_with("Noir Player couldn't set up"));
+    }
 
     #[test]
     fn assets_are_chosen_per_platform() {
