@@ -5,9 +5,9 @@
  * The keys live only here, in the deployment's environment.
  */
 
-export type ServiceKey = "LASTFM_API_KEY" | "YOUTUBE_API_KEY" | "RAPIDAPI_KEY";
+export type ServiceKey = "LASTFM_API_KEY";
 
-const SERVICE_KEYS: readonly ServiceKey[] = ["LASTFM_API_KEY", "YOUTUBE_API_KEY", "RAPIDAPI_KEY"];
+const SERVICE_KEYS: readonly ServiceKey[] = ["LASTFM_API_KEY"];
 
 /** The key for a service, or `null` when this deployment has none set. */
 export function serviceKey(name: ServiceKey): string | null {
@@ -95,4 +95,16 @@ export function fail(status: number, message: string): Response {
       "cache-control": "no-store",
     },
   });
+}
+
+/**
+ * The answer for an endpoint only older copies of the app call. They show
+ * `error` as-is, so it tells the person what to do. It calls no service.
+ */
+export function retired(): Response {
+  return fail(
+    410,
+    "This version of Noir Player can't find songs through Noir Player's server. " +
+      "Update Noir Player, or add your own YouTube and RapidAPI keys in Settings → Discover.",
+  );
 }

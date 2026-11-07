@@ -18,8 +18,3 @@ export function searchQuery(value: string | null): string | null {
   }
   return trimmed;
 }
-
-/** YouTube video ids are exactly eleven URL-safe base64 characters. */
-export function videoId(value: string | null): string | null {
-  return value !== null && /^[A-Za-z0-9_-]{11}$/.test(value) ? value : null;
-}

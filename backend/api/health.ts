@@ -11,7 +11,5 @@ export function GET(): Response {
   return json({
     ok: true,
     lastfm: serviceKey("LASTFM_API_KEY") !== null,
-    youtube: serviceKey("YOUTUBE_API_KEY") !== null,
-    rapidapi: serviceKey("RAPIDAPI_KEY") !== null,
   });
 }
