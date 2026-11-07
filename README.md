@@ -23,6 +23,41 @@ Each Windows release has two installers.
 
 Your library, playlists and settings are kept in `%LOCALAPPDATA%\noir-player`, apart from the app, so switching installers keeps them. On an `.msi` copy, updates leave the copy in Program Files as it is, so other accounts keep the version they had. To upgrade that copy for everyone instead, turn on **Update for all users (needs administrator approval)** in **Settings → Install Updates**. Windows then asks for administrator approval on each update. You can also uninstall the `.msi` copy and reinstall the app with `setup.exe`.
 
+### If Windows blocks Noir Player
+
+Noir Player's installers aren't code-signed, which costs money every year for a free app. Windows is more careful with unsigned programs and sometimes stops one that is safe. Only make these exceptions for a copy you downloaded from this repository's [releases page](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases).
+
+**"Windows protected your PC" when you open the installer.** This is SmartScreen. Click **More info**, then **Run anyway**. It asks once per download.
+
+**Windows Security removes the app, or Discover stops working.** Microsoft Defender sometimes flags a new unsigned program by mistake, or the yt-dlp helper that Discover downloads. Get the file back and tell Defender to leave Noir Player's folders alone:
+
+1. Open **Windows Security → Virus & threat protection → Protection history**. Find the Noir Player or `yt-dlp.exe` entry, then choose **Actions → Restore** (or **Allow on device**).
+2. Go back to **Virus & threat protection**. Under **Virus & threat protection settings**, click **Manage settings**, scroll to **Exclusions** and click **Add or remove exclusions**.
+3. Click **Add an exclusion → Folder** and add each folder that exists on your PC:
+
+   | Folder | What it is |
+   | --- | --- |
+   | `%LOCALAPPDATA%\Noir Player` | The app, installed with `setup.exe` |
+   | `C:\Program Files\Noir Player` | The app, installed with the `.msi` |
+   | `%LOCALAPPDATA%\noir-player\tools` | yt-dlp and the MP3 converter Discover uses |
+
+   You can paste a path such as `%LOCALAPPDATA%\noir-player\tools` into the folder picker's address bar.
+4. Open Noir Player again. If Discover still shows an error, play a song once more and it will download the helper again.
+
+To add the same exclusions in one go, open **Terminal (Admin)** or **Windows PowerShell (Admin)** and run:
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Noir Player", "$env:LOCALAPPDATA\noir-player\tools"
+# Only if you installed with the .msi:
+Add-MpPreference -ExclusionPath "C:\Program Files\Noir Player"
+```
+
+To undo this later, remove the folders under **Exclusions**, or run `Remove-MpPreference -ExclusionPath` with the same paths.
+
+**"Smart App Control blocked an app that may be unsafe."** Smart App Control, on some Windows 11 PCs, has no exception list. The only way past it is to turn it off in **Windows Security → App & browser control → Smart App Control settings**. On some versions of Windows it can't be turned back on without reinstalling Windows, so decide carefully.
+
+If Defender flags a Noir Player download, you can help by reporting it to Microsoft as a mistake at [Submit a file for malware analysis](https://www.microsoft.com/en-us/wdsi/filesubmission). Reports like this are how Microsoft learns the app is safe.
+
 ## Playback and library
 
 The library scans the system Music folder by default as well as any custom folders configured in **Settings** (`Ctrl+,`). Scanning runs recursively on startup and when rescanned, reading title, artist, album, release year, duration, and embedded artwork, plus each file's modified time for the recently added ordering. It groups tracks by album and artist, deduplicates files across folders, and searches across title, artist, and album. It does not follow symbolic links or Windows reparse points. Multiple scan folders can be added, removed, or rescanned at any time via the Settings modal.
