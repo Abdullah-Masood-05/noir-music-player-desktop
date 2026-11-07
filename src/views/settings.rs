@@ -792,7 +792,7 @@ fn build_rows(
                             "discover-format-mp3",
                             "MP3 (most compatible)",
                             mp3_unavailable.unwrap_or(
-                                "For older players and car stereos. Same sound quality, larger files.                                  Downloads a small converter (about 6 MB) the first time.",
+                                "For older players and car stereos. Same sound quality, larger files. Downloads a small converter (about 6 MB) the first time.",
                             ),
                             model.store.discover_format == crate::ytdlp::AudioFormat::Mp3
                                 && mp3_unavailable.is_none(),
@@ -812,7 +812,7 @@ fn build_rows(
             row_base(idx, active, is_light, cx)
                 .child(label_cell(
                     "Your Own Last.fm Key",
-                    "Optional. Trending and search work without it through Noir Player's server.                      A key you add here calls Last.fm directly, on your own quota.",
+                    "Optional. Trending and search work without it through Noir Player's server. A key you add here calls Last.fm directly, on your own quota.",
                     is_light,
                 ))
                 .into_any_element(),
