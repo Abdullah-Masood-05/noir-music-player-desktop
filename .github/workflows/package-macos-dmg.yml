@@ -14,7 +14,7 @@ permissions:
 jobs:
   build-and-upload-dmg:
     name: Build and Upload DMG
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Create DMG from release app bundle
         env:
