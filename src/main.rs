@@ -8,9 +8,11 @@ mod discover_art;
 mod handoff;
 mod media;
 mod single_instance;
+mod tools;
 pub mod update;
 mod views;
 mod widgets;
+mod ytdlp;
 
 use gpui_kit::component::Root;
 use gpui_kit::*;

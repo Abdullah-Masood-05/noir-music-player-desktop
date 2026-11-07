@@ -867,14 +867,14 @@ impl NoirPlayerModel {
         } else {
             None
         };
-        let keys = crate::config::ApiKeys::from_store(&self.store);
+        let format = self.store.discover_format;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     media::prepare_discover_audio(
                         &source,
-                        &keys,
+                        format,
                         download,
                         cached.as_deref(),
                         download_folder.as_deref(),

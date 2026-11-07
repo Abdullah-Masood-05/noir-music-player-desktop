@@ -444,7 +444,7 @@ fn validate_prepared_audio(path: &Path, cancel: &std::sync::atomic::AtomicBool) 
 
 pub fn prepare_discover_audio(
     source: &crate::api::Track,
-    keys: &crate::config::ApiKeys,
+    format: crate::ytdlp::AudioFormat,
     download: bool,
     cached: Option<&Path>,
     download_folder: Option<&Path>,
@@ -523,13 +523,13 @@ pub fn prepare_discover_audio(
         if received != metadata.len() {
             bail!("Prepared audio changed while copying.");
         }
+        file.sync_all()
+            .map_err(|_| anyhow!("Could not flush the temporary audio file."))?;
+        drop(file);
     } else {
-        let url = crate::api::resolve_audio(source, keys, cancel, progress)?;
-        crate::api::download_audio(&url, keys, &mut file, cancel, progress)?;
+        drop(file);
+        fetch_with_ytdlp(source, format, &folder, &temp.0, cancel, progress)?;
     }
-    file.sync_all()
-        .map_err(|_| anyhow!("Could not flush the temporary audio file."))?;
-    drop(file);
     crate::api::check_cancel(cancel)?;
     progress("Validating audio and saving metadata...");
     validate_prepared_audio(&temp.0, cancel)?;
@@ -599,6 +599,48 @@ pub fn prepare_discover_audio(
     Ok(prepared)
 }
 
+/// Finds the song on YouTube and downloads its audio with yt-dlp, leaving it
+/// at `target`. yt-dlp works in a scratch folder beside `target`, which is
+/// removed afterwards however it ends.
+fn fetch_with_ytdlp(
+    source: &crate::api::Track,
+    format: crate::ytdlp::AudioFormat,
+    folder: &Path,
+    target: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: &impl Fn(&str),
+) -> Result<()> {
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let found = crate::ytdlp::find(&source.name, &source.artist, progress, cancel)?;
+    let scratch = Scratch(folder.join(format!(
+        ".noir-dl-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )));
+    fs::create_dir(&scratch.0).map_err(|_| {
+        anyhow!("Could not create a temporary folder. Check free space and permissions.")
+    })?;
+    let downloaded = crate::ytdlp::download(&found, &scratch.0, format, progress, cancel)?;
+    crate::api::check_cancel(cancel)?;
+    let metadata = fs::metadata(&downloaded)
+        .map_err(|_| anyhow!("The downloaded audio could not be read."))?;
+    if metadata.len() == 0 || metadata.len() > 100 * 1024 * 1024 {
+        bail!("Downloaded audio is empty or exceeds the 100 MiB limit.");
+    }
+    fs::rename(&downloaded, target).map_err(|_| {
+        anyhow!("Could not save the downloaded audio. Check free space and permissions.")
+    })?;
+    Ok(())
+}
+
 /// Writes the title, artist and (when given) front cover into a downloaded
 /// song, replacing the tag of the format's usual kind.
 fn write_discover_tags(
@@ -663,11 +705,15 @@ fn embedded_cover(path: &Path) -> Option<Vec<u8>> {
         .options(ParseOptions::new().parsing_mode(ParsingMode::Relaxed))
         .read()
         .ok()?;
-    tagged
-        .tags()
-        .iter()
-        .flat_map(|tag| tag.pictures())
-        .find(|picture| picture.pic_type() == PictureType::CoverFront)
+    let mut pictures = tagged.tags().iter().flat_map(|tag| tag.pictures());
+    // M4A stores no picture type, so its cover reads back as "other".
+    let mut first = None;
+    pictures
+        .find(|picture| {
+            first.get_or_insert(*picture);
+            picture.pic_type() == PictureType::CoverFront
+        })
+        .or(first)
         .map(|picture| picture.data().to_vec())
 }
 
@@ -2767,5 +2813,53 @@ mod tests {
         player.stop();
         assert_eq!(player.position(), Duration::ZERO);
         assert!(player.is_paused());
+    }
+    /// The whole Discover download through yt-dlp, with `NOIR_TOOLS_DIR` set
+    /// to a scratch folder: `cargo test live_discover -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "uses the network and YouTube"]
+    fn live_discover_download_saves_a_tagged_playable_file() {
+        use crate::ytdlp::AudioFormat;
+        assert!(std::env::var_os("NOIR_TOOLS_DIR").is_some());
+        let folder =
+            std::env::temp_dir().join(format!("noir-live-discover-{}", std::process::id()));
+        let source = crate::api::Track {
+            name: "Numb".into(),
+            artist: "Linkin Park".into(),
+            url: None,
+        };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        for (format, extension) in [(AudioFormat::Original, "m4a"), (AudioFormat::Mp3, "mp3")] {
+            let started = std::time::Instant::now();
+            let mut prepared = prepare_discover_audio(
+                &source,
+                format,
+                true,
+                None,
+                Some(&folder),
+                &cancel,
+                &|_| {},
+            )
+            .unwrap();
+            eprintln!(
+                "{format:?}: {} in {:?}, {:?}",
+                prepared.track.path.display(),
+                started.elapsed(),
+                prepared.track.duration
+            );
+            assert_eq!(prepared.track.path.extension().unwrap(), extension);
+            assert_eq!(prepared.track.title, "Numb");
+            assert!(prepared.track.duration > Duration::from_secs(120));
+            assert!(embedded_cover(&prepared.track.path).is_some());
+            prepared.keep();
+        }
+        let leftovers: Vec<_> = fs::read_dir(&folder)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        eprintln!("{leftovers:?}");
+        assert!(leftovers.iter().all(|n| !n.starts_with('.')));
+        let _ = fs::remove_dir_all(&folder);
     }
 }

@@ -46,6 +46,10 @@ pub struct Store {
     pub youtube_api_key: String,
     #[serde(default)]
     pub rapidapi_key: String,
+    /// What Discover saves: the original M4A from YouTube, or an MP3
+    /// converted on this computer. Saved as "original" or "mp3".
+    #[serde(default, deserialize_with = "crate::ytdlp::AudioFormat::lenient")]
+    pub discover_format: crate::ytdlp::AudioFormat,
     #[serde(default)]
     pub shuffle: bool,
     /// Older builds stored a plain `repeat_all` flag; it is still read
@@ -191,6 +195,7 @@ impl Default for Store {
             lastfm_api_key: String::new(),
             youtube_api_key: String::new(),
             rapidapi_key: String::new(),
+            discover_format: crate::ytdlp::AudioFormat::Original,
             shuffle: false,
             repeat: RepeatMode::Off,
             update_install_type: None,

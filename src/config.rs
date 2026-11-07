@@ -29,29 +29,20 @@ static DOTENV: LazyLock<()> = LazyLock::new(|| {
     dotenvy::dotenv().ok();
 });
 
-/// The keys Discover calls services with directly. An empty key means that
-/// service goes through the backend instead.
+/// The key Discover calls Last.fm with directly. An empty key means charts
+/// and search go through the backend instead. (Audio no longer uses any key:
+/// it is found and downloaded on this computer, see `ytdlp`.)
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApiKeys {
     pub lastfm: String,
-    pub youtube: String,
-    pub rapidapi: String,
 }
 
 impl ApiKeys {
-    /// The keys entered in Settings, each falling back to the environment.
+    /// The key entered in Settings, falling back to the environment.
     pub fn from_store(store: &Store) -> Self {
         Self {
             lastfm: key(&store.lastfm_api_key, "LASTFM_API_KEY"),
-            youtube: key(&store.youtube_api_key, "YOUTUBE_API_KEY"),
-            rapidapi: key(&store.rapidapi_key, "RAPIDAPI_KEY"),
         }
-    }
-
-    /// Every key this app holds, for checking a service hasn't echoed one
-    /// back where it could leak.
-    pub fn all(&self) -> [&str; 3] {
-        [&self.lastfm, &self.youtube, &self.rapidapi]
     }
 }
 
@@ -74,14 +65,10 @@ mod tests {
     fn a_key_entered_in_settings_is_used_as_entered_less_whitespace() {
         let store = Store {
             lastfm_api_key: "  typed-with-spaces  ".into(),
-            youtube_api_key: "youtube".into(),
-            rapidapi_key: "rapidapi".into(),
             ..Store::default()
         };
         let keys = ApiKeys::from_store(&store);
         assert_eq!(keys.lastfm, "typed-with-spaces");
-        assert_eq!(keys.youtube, "youtube");
-        assert_eq!(keys.rapidapi, "rapidapi");
     }
 
     #[test]
