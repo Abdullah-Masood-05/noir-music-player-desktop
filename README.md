@@ -15,7 +15,7 @@ This is the desktop version of [NoirPlayer for Android](https://github.com/Abdul
 Download the latest version from the [releases page](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases/latest). See [packaging and releases](#packaging-and-releases) for target platforms and testing status.
 
 > [!CAUTION]
-> **On Windows, SmartScreen or Windows Security may stop Noir Player from running.** See [If Windows blocks Noir Player](#if-windows-blocks-noir-player) for how to fix it.
+> **On Windows, SmartScreen, Smart App Control or Windows Security may stop Noir Player from running.** See [If Windows blocks Noir Player](#if-windows-blocks-noir-player) for how to fix it.
 
 ### Which Windows download?
 
@@ -29,9 +29,11 @@ Your library, playlists and settings are kept in `%LOCALAPPDATA%\noir-player`, a
 ### If Windows blocks Noir Player
 
 > [!CAUTION]
-> **Windows may block Noir Player or remove part of it.** Noir Player's installers aren't code-signed, which costs money every year for a free app. Windows is more careful with unsigned programs and sometimes stops one that is safe: SmartScreen can block the installer, and Windows Security can delete the app or the yt-dlp helper Discover needs. If that happens, follow the steps below. Only make these exceptions for a copy you downloaded from this repository's [releases page](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases).
+> **Windows may block Noir Player or remove part of it.** Noir Player's installers aren't code-signed, which costs money every year for a free app. Windows is more careful with unsigned programs and sometimes stops one that is safe: SmartScreen or Smart App Control can block the installer, and Windows Security can delete the app or the yt-dlp helper Discover needs. If that happens, follow the steps below. Only make these exceptions for a copy you downloaded from this repository's [releases page](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases).
 
 **"Windows protected your PC" when you open the installer.** This is SmartScreen. Click **More info**, then **Run anyway**. It asks once per download.
+
+**"Smart App Control blocked an app that may be unsafe."** If Windows says it blocked the app to protect you, Smart App Control is on. It has no way to allow a single app, so you have to turn it off: open **Windows Security → App & browser control → Smart App Control settings** and choose **Off**. Then run the installer again. On some versions of Windows, Smart App Control can't be turned back on without reinstalling Windows.
 
 **Windows Security removes the app, or Discover stops working.** Microsoft Defender sometimes flags a new unsigned program by mistake, or the yt-dlp helper that Discover downloads. Get the file back and tell Defender to leave Noir Player's folders alone:
 
@@ -57,9 +59,6 @@ Add-MpPreference -ExclusionPath "C:\Program Files\Noir Player"
 ```
 
 To undo this later, remove the folders under **Exclusions**, or run `Remove-MpPreference -ExclusionPath` with the same paths.
-
-**"Smart App Control blocked an app that may be unsafe."** Smart App Control, on some Windows 11 PCs, has no exception list. The only way past it is to turn it off in **Windows Security → App & browser control → Smart App Control settings**. On some versions of Windows it can't be turned back on without reinstalling Windows, so decide carefully.
-
 If Defender flags a Noir Player download, you can help by reporting it to Microsoft as a mistake at [Submit a file for malware analysis](https://www.microsoft.com/en-us/wdsi/filesubmission). Reports like this are how Microsoft learns the app is safe.
 
 ## Playback and library

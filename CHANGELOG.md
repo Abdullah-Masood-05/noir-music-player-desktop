@@ -28,11 +28,12 @@ Version 2.5.0 finds and downloads Discover songs right on your computer.
 
 > [!CAUTION]
 > **Windows may stop Noir Player from running.** Noir Player isn't
-> code-signed, so Windows sometimes stops it or the yt-dlp helper Discover
-> downloads. See
+> code-signed, so SmartScreen or Smart App Control can block the installer,
+> and Windows Security can delete the app or the yt-dlp helper Discover needs.
+> See
 > [If Windows blocks Noir Player](https://github.com/Abdullah-Masood-05/noir-music-player-desktop#if-windows-blocks-noir-player)
-> for how to get past SmartScreen, restore a file Windows Security removed,
-> and add exclusions for Noir Player's folders.
+> for how to get past SmartScreen, turn off Smart App Control, restore a file
+> Windows Security removed, and add exclusions for Noir Player's folders.
 
 ## [2.4.4]
 
