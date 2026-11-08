@@ -14,6 +14,9 @@ This is the desktop version of [NoirPlayer for Android](https://github.com/Abdul
 
 Download the latest version from the [releases page](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases/latest). See [packaging and releases](#packaging-and-releases) for target platforms and testing status.
 
+> [!CAUTION]
+> **On Windows, SmartScreen or Windows Security may stop Noir Player from running.** See [If Windows blocks Noir Player](#if-windows-blocks-noir-player) for how to fix it.
+
 ### Which Windows download?
 
 Each Windows release has two installers.
@@ -25,7 +28,8 @@ Your library, playlists and settings are kept in `%LOCALAPPDATA%\noir-player`, a
 
 ### If Windows blocks Noir Player
 
-Noir Player's installers aren't code-signed, which costs money every year for a free app. Windows is more careful with unsigned programs and sometimes stops one that is safe. Only make these exceptions for a copy you downloaded from this repository's [releases page](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases).
+> [!CAUTION]
+> **Windows may block Noir Player or remove part of it.** Noir Player's installers aren't code-signed, which costs money every year for a free app. Windows is more careful with unsigned programs and sometimes stops one that is safe: SmartScreen can block the installer, and Windows Security can delete the app or the yt-dlp helper Discover needs. If that happens, follow the steps below. Only make these exceptions for a copy you downloaded from this repository's [releases page](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases).
 
 **"Windows protected your PC" when you open the installer.** This is SmartScreen. Click **More info**, then **Run anyway**. It asks once per download.
 
