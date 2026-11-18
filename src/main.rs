@@ -6,6 +6,7 @@ mod config;
 mod crash;
 mod discover_art;
 mod handoff;
+mod library_cache;
 mod media;
 mod single_instance;
 mod tools;
@@ -66,17 +67,14 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
 
-            let store = app::store::Store::default_path()
-                .ok()
-                .and_then(|p| app::store::Store::load(&p).ok())
-                .unwrap_or_default();
-            views::ui::apply_theme(&store.theme_mode, cx);
+            let loaded = app::LoadedStore::load();
+            views::ui::apply_theme(loaded.theme_mode(), cx);
 
             let options = native_window_options(cx);
             cx.spawn(async move |cx| {
                 let window = cx
                     .open_window(options, |window, cx| {
-                        let view = cx.new(|cx| app::NoirPlayerModel::new(window, cx));
+                        let view = cx.new(|cx| app::NoirPlayerModel::new(window, cx, loaded));
                         cx.new(|cx| Root::new(view, window, cx))
                     })
                     .expect("Failed to open window");

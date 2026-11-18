@@ -9,6 +9,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::library_cache::LibraryCache;
 use crate::media::{self, MediaPlayer, Track};
 use crate::views::{discover, library, player, playlists};
 use crate::widgets::{player_bar, queue_panel, sidebar};
@@ -259,6 +260,9 @@ pub struct NoirPlayerModel {
     /// Bumped whenever the library or the saved store is replaced, so data
     /// derived from them can be cached and invalidated cheaply.
     data_generation: u64,
+    /// Bumped only when the library itself is replaced; background cover
+    /// loading is abandoned when it moves.
+    library_generation: u64,
     /// The playlist page's unavailable files, keyed on `data_generation` and
     /// the playlist name, so renders (every playback tick) just read it.
     playlist_missing_cache: Option<(u64, String, std::rc::Rc<[PathBuf]>)>,
@@ -345,20 +349,54 @@ pub struct NoirPlayerModel {
     dialog_subscription: Option<Subscription>,
 }
 
-impl NoirPlayerModel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let player = MediaPlayer::new();
-        let (store, store_path, storage_error) = match Store::default_path() {
+/// The saved store as read once at startup, handed to the window so it is not
+/// read and parsed a second time.
+pub struct LoadedStore {
+    store: Store,
+    path: Option<PathBuf>,
+    error: Option<String>,
+}
+
+impl LoadedStore {
+    pub fn load() -> Self {
+        match Store::default_path() {
             Ok(path) => match Store::load(&path) {
-                Ok(store) => (store, Some(path), None),
-                Err(error) => (
-                    Store::default(),
-                    None,
-                    Some(format!("{error:#}. Saved data was not changed.")),
-                ),
+                Ok(store) => Self {
+                    store,
+                    path: Some(path),
+                    error: None,
+                },
+                Err(error) => Self {
+                    store: Store::default(),
+                    path: None,
+                    error: Some(format!("{error:#}. Saved data was not changed.")),
+                },
             },
-            Err(error) => (Store::default(), None, Some(format!("{error:#}"))),
-        };
+            Err(error) => Self {
+                store: Store::default(),
+                path: None,
+                error: Some(format!("{error:#}")),
+            },
+        }
+    }
+
+    pub fn theme_mode(&self) -> &str {
+        &self.store.theme_mode
+    }
+}
+
+/// How many covers are read and built per batch. Small enough that the first
+/// ones (the top of the list) appear almost at once.
+const COVER_BATCH: usize = 24;
+
+impl NoirPlayerModel {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, loaded: LoadedStore) -> Self {
+        let player = MediaPlayer::new();
+        let LoadedStore {
+            store,
+            path: store_path,
+            error: storage_error,
+        } = loaded;
         let library_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search title, artist or album"));
         let discover_search =
@@ -431,6 +469,7 @@ impl NoirPlayerModel {
             song_menu: None,
             resume_attempted: false,
             data_generation: 0,
+            library_generation: 0,
             playlist_missing_cache: None,
             sort_mode: SortMode::TitleAsc,
             sort_menu_open: false,
@@ -938,10 +977,40 @@ impl NoirPlayerModel {
         }
         self.scanning = true;
         self.status = "Scanning music folders...".into();
+        let first_scan = self.tracks.is_empty();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { media::scan_folders(&folders) })
+            let background = cx.background_executor().clone();
+            let cache_path = LibraryCache::default_path();
+            let (cache, shown) = {
+                let path = cache_path.clone();
+                let folders = folders.clone();
+                background
+                    .spawn(async move {
+                        let cache = path.as_deref().map(LibraryCache::load).unwrap_or_default();
+                        let shown = media::cached_library(&cache, &folders);
+                        (cache, shown)
+                    })
+                    .await
+            };
+            if first_scan && !shown.is_empty() {
+                let _ = this.update(cx, |this, cx| {
+                    // Never replace a library something else has loaded.
+                    if this.tracks.is_empty() {
+                        this.set_library(shown, &[], cx);
+                    }
+                });
+            }
+            let result = background
+                .spawn(async move {
+                    let (result, fresh) = media::scan_folders(&folders, &cache);
+                    // Only rewrite when something was read, added or removed.
+                    if !fresh.same_as(&cache) {
+                        if let Some(path) = &cache_path {
+                            let _ = fresh.save(path);
+                        }
+                    }
+                    result
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.scanning = false;
@@ -958,7 +1027,6 @@ impl NoirPlayerModel {
         errors: &[String],
         cx: &mut Context<Self>,
     ) {
-        self.retire_covers();
         for track in self
             .discover_cached
             .iter()
@@ -1014,8 +1082,31 @@ impl NoirPlayerModel {
             .collect();
         album_map.sort_by_key(|a| a.0.to_lowercase());
         artist_map.sort_by_key(|a| a.0.to_lowercase());
+        // A scan reads no artwork, so a file that has not changed keeps the cover
+        // it already has instead of losing it until it is loaded again.
+        {
+            let old: std::collections::HashMap<&std::path::Path, &Track> = self
+                .tracks
+                .iter()
+                .filter(|track| track.artwork_image.is_some())
+                .map(|track| (track.path.as_path(), track))
+                .collect();
+            for track in tracks.iter_mut() {
+                if track.artwork_image.is_some() || track.artwork.is_some() {
+                    continue;
+                }
+                if let Some(previous) = old.get(track.path.as_path()) {
+                    if previous.added == track.added {
+                        track.artwork = previous.artwork.clone();
+                        track.artwork_image = previous.artwork_image.clone();
+                    }
+                }
+            }
+        }
+        self.retire_covers(&tracks);
         self.tracks = tracks;
         self.data_generation = self.data_generation.wrapping_add(1);
+        self.library_generation = self.library_generation.wrapping_add(1);
         self.albums = album_map;
         self.artists = artist_map;
         self.queue = store::resolve_paths(&queue_paths, &self.tracks);
@@ -1027,7 +1118,68 @@ impl NoirPlayerModel {
             self.player.stop();
         }
         self.resume_last_song(cx);
+        self.load_covers(cx);
         cx.notify();
+    }
+
+    /// Reads covers for the tracks that lack one, in the background and in list
+    /// order, so the list appears at once and the pictures follow. Abandoned if
+    /// the library is replaced meanwhile; its results would be stale.
+    fn load_covers(&mut self, cx: &mut Context<Self>) {
+        let generation = self.library_generation;
+        let wanted: Vec<(usize, PathBuf)> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| {
+                track.artwork.is_none()
+                    && track.artwork_image.is_none()
+                    && !media::is_discover_preview(&track.path)
+            })
+            .map(|(index, track)| (index, track.path.clone()))
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let (sender, receiver) = smol::channel::unbounded();
+        cx.background_executor()
+            .spawn(async move {
+                let mut loader = media::CoverLoader::default();
+                for chunk in wanted.chunks(COVER_BATCH) {
+                    let paths: Vec<PathBuf> = chunk.iter().map(|(_, path)| path.clone()).collect();
+                    let batch: Vec<(usize, media::BuiltCover)> = chunk
+                        .iter()
+                        .zip(loader.load(&paths))
+                        .filter_map(|((index, _), cover)| Some((*index, cover?)))
+                        .collect();
+                    // A closed receiver means the library moved on.
+                    if sender.send(batch).await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        cx.spawn(async move |this, cx| {
+            while let Ok(batch) = receiver.recv().await {
+                let keep_going = this.update(cx, |this, cx| {
+                    if this.library_generation != generation {
+                        return false;
+                    }
+                    for (index, (image, hero)) in batch {
+                        if let Some(track) = this.tracks.get_mut(index) {
+                            track.artwork = Some(hero);
+                            track.artwork_image = Some(image);
+                        }
+                    }
+                    cx.notify();
+                    true
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn collection_indices(&self, collection: &Collection) -> Vec<usize> {
@@ -2331,11 +2483,19 @@ impl NoirPlayerModel {
     /// rescan builds fresh images for the same albums, so without this every
     /// rescan would strand a library's worth of textures. A cover the new
     /// library still shares is simply re-uploaded on the next frame.
-    fn retire_covers(&mut self) {
+    fn retire_covers(&mut self, next: &[Track]) {
+        let kept: std::collections::HashSet<*const RenderImage> = next
+            .iter()
+            .filter_map(|track| track.artwork_image.as_ref())
+            .map(std::sync::Arc::as_ptr)
+            .collect();
         for track in &self.tracks {
             let Some(cover) = &track.artwork_image else {
                 continue;
             };
+            if kept.contains(&std::sync::Arc::as_ptr(cover)) {
+                continue;
+            }
             if !self
                 .retired_covers
                 .iter()

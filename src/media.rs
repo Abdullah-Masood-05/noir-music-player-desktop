@@ -19,6 +19,8 @@ use rodio::mixer::Mixer;
 use rodio::{Decoder, DeviceTrait, OutputStream, OutputStreamBuilder, Sink, Source};
 use walkdir::WalkDir;
 
+use crate::library_cache::LibraryCache;
+
 #[derive(Clone, Debug)]
 pub struct Track {
     pub path: PathBuf,
@@ -727,7 +729,12 @@ fn embedded_cover(path: &Path) -> Option<Vec<u8>> {
         .map(|picture| picture.data().to_vec())
 }
 
-fn scan_folder_inner(folder: &Path, sort: bool) -> ScanResult {
+fn scan_folder_inner(
+    folder: &Path,
+    sort: bool,
+    cache: Option<&LibraryCache>,
+    mut fresh: Option<&mut LibraryCache>,
+) -> ScanResult {
     let mut result = ScanResult::default();
     match fs::symlink_metadata(folder) {
         Ok(metadata) if is_link(&metadata) || !metadata.is_dir() => {
@@ -759,7 +766,7 @@ fn scan_folder_inner(folder: &Path, sort: bool) -> ScanResult {
 
     // Walking is inherently serial; collect the whole list first so the reads
     // can be spread across every core.
-    let mut found: Vec<(PathBuf, Option<std::time::SystemTime>)> = Vec::new();
+    let mut found: Vec<(PathBuf, Option<std::time::SystemTime>, u64)> = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -772,17 +779,32 @@ fn scan_folder_inner(folder: &Path, sort: bool) -> ScanResult {
             continue;
         }
         // WalkDir already statted this entry; reuse it instead of a second stat.
-        let added = entry
-            .metadata()
-            .ok()
+        let metadata = entry.metadata().ok();
+        let added = metadata
+            .as_ref()
             .and_then(|metadata| metadata.modified().ok());
-        found.push((entry.into_path(), added));
+        let size = metadata.map_or(0, |metadata| metadata.len());
+        found.push((entry.into_path(), added, size));
     }
 
     result.tracks.reserve(found.len());
-    for read in map_parallel(&found, |(path, added)| read_track_with_added(path, *added)) {
+    let reads = map_parallel(&found, |(path, added, size)| {
+        if let (Some(cache), Some(added)) = (cache, added) {
+            if let Some(track) = cache.lookup(path, *size, *added) {
+                return Ok(track);
+            }
+        }
+        // Standalone scans have no later pass to attach covers.
+        read_track_with_added(path, *added, sort)
+    });
+    for (read, (_, _, size)) in reads.into_iter().zip(&found) {
         match read {
-            Ok(track) => result.tracks.push(track),
+            Ok(track) => {
+                if let Some(fresh) = fresh.as_deref_mut() {
+                    fresh.insert(&track, *size);
+                }
+                result.tracks.push(track);
+            }
             Err(error) => result.errors.push(format!("{error:#}")),
         }
     }
@@ -801,7 +823,7 @@ fn scan_folder_inner(folder: &Path, sort: bool) -> ScanResult {
 /// final sort happens once.
 #[allow(dead_code)]
 pub fn scan_folder(folder: &Path) -> ScanResult {
-    scan_folder_inner(folder, true)
+    scan_folder_inner(folder, true, None, None)
 }
 fn sort_tracks(tracks: &mut [Track]) {
     tracks.sort_by_cached_key(|track| {
@@ -814,13 +836,25 @@ fn sort_tracks(tracks: &mut [Track]) {
     });
 }
 
-pub fn scan_folders(folders: &[PathBuf]) -> ScanResult {
+/// Scans every folder without touching artwork; covers are loaded afterwards by
+/// `CoverLoader`. Files unchanged since `cache` was written are not re-read.
+/// Returns the cache describing what was found.
+/// The tracks a cache remembers under `folders`, sorted like a scan: what is
+/// shown while the scan itself is still running.
+pub fn cached_library(cache: &LibraryCache, folders: &[PathBuf]) -> Vec<Track> {
+    let mut tracks = cache.tracks_under(folders);
+    sort_tracks(&mut tracks);
+    tracks
+}
+
+pub fn scan_folders(folders: &[PathBuf], cache: &LibraryCache) -> (ScanResult, LibraryCache) {
+    let mut fresh = LibraryCache::default();
     let mut result = ScanResult::default();
     let mut total = 0usize;
     let mut subs: Vec<ScanResult> = Vec::with_capacity(folders.len());
     for folder in folders {
         // Skip the per-folder sort; one final sort covers the merge.
-        let sub = scan_folder_inner(folder, false);
+        let sub = scan_folder_inner(folder, false, Some(cache), Some(&mut fresh));
         total += sub.tracks.len();
         subs.push(sub);
     }
@@ -832,11 +866,10 @@ pub fn scan_folders(folders: &[PathBuf]) -> ScanResult {
     // Dedupe without cloning a PathBuf per track: adjacent after a path sort.
     result.tracks.sort_by(|a, b| a.path.cmp(&b.path));
     result.tracks.dedup_by(|a, b| a.path == b.path);
-    attach_covers(&mut result.tracks);
     sort_tracks(&mut result.tracks);
     result.errors.sort();
     result.errors.dedup();
-    result
+    (result, fresh)
 }
 
 /// Groups tracks by the exact bytes of their cover. Tracks from one album carry
@@ -930,12 +963,16 @@ fn supported_extension(path: &Path) -> bool {
 /// Single-track read, used for freshly downloaded audio. The bulk scan defers
 /// cover building to `attach_covers` so albums decode once.
 fn read_track(path: &Path) -> Result<Track> {
-    let mut track = read_track_with_added(path, None)?;
+    let mut track = read_track_with_added(path, None, true)?;
     attach_covers(std::slice::from_mut(&mut track));
     Ok(track)
 }
 
-fn read_track_with_added(path: &Path, added_hint: Option<std::time::SystemTime>) -> Result<Track> {
+fn read_track_with_added(
+    path: &Path,
+    added_hint: Option<std::time::SystemTime>,
+    covers: bool,
+) -> Result<Track> {
     let tagged = Probe::open(path)
         .map_err(|error| anyhow!("{}: {error}", path.display()))
         .and_then(|probe| {
@@ -945,7 +982,11 @@ fn read_track_with_added(path: &Path, added_hint: Option<std::time::SystemTime>)
         })
         .and_then(|probe| {
             probe
-                .options(ParseOptions::new().parsing_mode(ParsingMode::Relaxed))
+                .options(
+                    ParseOptions::new()
+                        .parsing_mode(ParsingMode::Relaxed)
+                        .read_cover_art(covers),
+                )
                 .read()
                 .map_err(|error| anyhow!("{}: {error}", path.display()))
         });
@@ -1000,18 +1041,7 @@ fn read_track_with_added(path: &Path, added_hint: Option<std::time::SystemTime>)
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.into_owned())
         .unwrap_or_else(|| "Unknown Album".to_owned());
-    let cover_of = |tag: &lofty::tag::Tag| {
-        tag.pictures()
-            .iter()
-            .find(|picture| picture.pic_type() == PictureType::CoverFront)
-            .or_else(|| tag.pictures().first())
-            .map(|picture| Arc::from(picture.data()))
-    };
-    // A WAV's usual tag (RIFF INFO) cannot hold pictures, so its cover lives in
-    // the ID3v2 tag beside it.
-    let artwork: Option<Arc<[u8]>> = tag
-        .and_then(cover_of)
-        .or_else(|| tagged.tags().iter().find_map(cover_of));
+    let artwork = if covers { cover_bytes(&tagged) } else { None };
     let year = tag.and_then(|tag| tag.year()).filter(|year| *year > 0);
 
     let search_key = Track::build_search_key(&title, &artist, &album);
@@ -1027,6 +1057,74 @@ fn read_track_with_added(path: &Path, added_hint: Option<std::time::SystemTime>)
         added: added_hint.or_else(|| file_added(path)),
         search_key,
     })
+}
+
+/// The cover embedded in a tagged file: the front cover if there is one, else
+/// the first picture. A WAV's usual tag (RIFF INFO) cannot hold pictures, so its
+/// cover lives in the ID3v2 tag beside it.
+fn cover_bytes(tagged: &lofty::file::TaggedFile) -> Option<Arc<[u8]>> {
+    let cover_of = |tag: &lofty::tag::Tag| {
+        tag.pictures()
+            .iter()
+            .find(|picture| picture.pic_type() == PictureType::CoverFront)
+            .or_else(|| tag.pictures().first())
+            .map(|picture| Arc::from(picture.data()))
+    };
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    tag.and_then(cover_of)
+        .or_else(|| tagged.tags().iter().find_map(cover_of))
+}
+
+fn read_cover_bytes(path: &Path) -> Option<Arc<[u8]>> {
+    let tagged = Probe::open(path)
+        .ok()?
+        .guess_file_type()
+        .ok()?
+        .options(
+            ParseOptions::new()
+                .parsing_mode(ParsingMode::Relaxed)
+                .read_properties(false),
+        )
+        .read()
+        .ok()?;
+    cover_bytes(&tagged)
+}
+
+/// A cover ready to draw: the list image and the bytes the hero is built from.
+pub type BuiltCover = (Arc<gpui_kit::RenderImage>, Arc<[u8]>);
+
+/// Reads and builds covers for a library in batches. Identical artwork, which
+/// is what an album's tracks carry, is decoded once for the whole library, and
+/// only a digest of it is kept between batches.
+#[derive(Default)]
+pub struct CoverLoader {
+    built: std::collections::HashMap<[u8; 32], Option<BuiltCover>>,
+}
+
+impl CoverLoader {
+    /// One entry per path: its cover, or `None` when it has none that decodes.
+    pub fn load(&mut self, paths: &[PathBuf]) -> Vec<Option<BuiltCover>> {
+        use sha2::{Digest, Sha256};
+        let raw = map_parallel(paths, |path| {
+            read_cover_bytes(path).map(|bytes| {
+                let digest: [u8; 32] = Sha256::digest(&bytes).into();
+                (digest, bytes)
+            })
+        });
+        let mut fresh: Vec<([u8; 32], Arc<[u8]>)> = Vec::new();
+        for (digest, bytes) in raw.iter().flatten() {
+            if !self.built.contains_key(digest) && !fresh.iter().any(|(known, _)| known == digest) {
+                fresh.push((*digest, bytes.clone()));
+            }
+        }
+        let made = map_parallel(&fresh, |(_, bytes)| build_cover(bytes));
+        for ((digest, _), cover) in fresh.into_iter().zip(made) {
+            self.built.insert(digest, cover);
+        }
+        raw.into_iter()
+            .map(|entry| entry.and_then(|(digest, _)| self.built.get(&digest)?.clone()))
+            .collect()
+    }
 }
 
 /// Modified time of a library file, used to order "Recently added".
@@ -1445,7 +1543,6 @@ const OUTPUT_RETRY: Duration = Duration::from_millis(1500);
 const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(20);
 /// An open that takes longer than this is abandoned to its thread and retried.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
-const STARTUP_OPEN_WAIT: Duration = Duration::from_secs(2);
 /// How long a new stream waits for the previous one to let go of the device.
 const RELEASE_WAIT: Duration = Duration::from_secs(1);
 /// A failed seek this close to the end is treated as reaching the end.
@@ -1707,7 +1804,8 @@ impl Output {
 struct PendingOutput {
     opened: mpsc::Receiver<Option<Opened>>,
     started: Instant,
-    /// Replacing a working output, so the UI need not report it as missing yet.
+    /// Replacing a working output, or still starting the first one, so the UI
+    /// need not report it as missing yet.
     replacing: bool,
 }
 
@@ -1750,20 +1848,17 @@ pub struct MediaPlayer {
 }
 
 impl MediaPlayer {
+    /// Opens the output in the background; the window never waits on a slow
+    /// or absent device. Until it is up, `has_output` reports true so the UI
+    /// doesn't flash "no audio device", and a track loaded in the meantime is
+    /// restored onto the output the moment it arrives (see `poll`).
     pub fn new() -> Self {
         let mut player = Self::with_output(None);
-        let opened = spawn_output(None);
-        match opened.recv_timeout(STARTUP_OPEN_WAIT) {
-            Ok(Some(opened)) => player.output = Some(Output::new(opened, Instant::now())),
-            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                player.pending = Some(PendingOutput {
-                    opened,
-                    started: Instant::now(),
-                    replacing: false,
-                });
-            }
-        }
+        player.pending = Some(PendingOutput {
+            opened: spawn_output(None),
+            started: Instant::now(),
+            replacing: true,
+        });
         player
     }
 
@@ -2482,7 +2577,10 @@ mod tests {
         write_wav(&path1);
         write_wav(&path2);
 
-        let res = scan_folders(&[temp1.0.clone(), temp2.0.clone(), temp1.0.clone()]);
+        let (res, _) = scan_folders(
+            &[temp1.0.clone(), temp2.0.clone(), temp1.0.clone()],
+            &LibraryCache::default(),
+        );
         assert_eq!(res.tracks.len(), 2);
         assert!(res.errors.is_empty());
     }
@@ -2634,6 +2732,90 @@ mod tests {
             );
             assert!(track.artwork.is_some());
         }
+    }
+
+    fn faked(path: &Path, title: &str) -> Track {
+        let metadata = fs::metadata(path).unwrap();
+        let mut track = read_track_with_added(path, metadata.modified().ok(), false).unwrap();
+        track.title = title.into();
+        track.rebuild_search_key();
+        track
+    }
+
+    #[test]
+    fn cached_scan_rereads_only_changed_files_and_drops_removed_ones() {
+        let temp = TempDir::new();
+        let kept = temp.0.join("kept.wav");
+        let edited = temp.0.join("edited.wav");
+        let removed = temp.0.join("removed.wav");
+        for path in [&kept, &edited, &removed] {
+            write_wav(path);
+        }
+        // A cache whose titles differ from the files shows which were re-read.
+        let mut cache = LibraryCache::default();
+        for path in [&kept, &edited, &removed] {
+            cache.insert(&faked(path, "cached"), fs::metadata(path).unwrap().len());
+        }
+
+        // Grow one file, and delete another.
+        let mut bytes = fs::read(&edited).unwrap();
+        bytes.extend_from_slice(&[0; 64]);
+        fs::write(&edited, bytes).unwrap();
+        fs::remove_file(&removed).unwrap();
+
+        let (result, fresh) = scan_folders(std::slice::from_ref(&temp.0), &cache);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let title_of = |name: &str| {
+            result
+                .tracks
+                .iter()
+                .find(|track| track.path.ends_with(name))
+                .map(|track| track.title.clone())
+        };
+        assert_eq!(title_of("kept.wav").as_deref(), Some("cached"));
+        assert_eq!(title_of("edited.wav").as_deref(), Some("edited"));
+        assert_eq!(title_of("removed.wav"), None);
+        assert_eq!(result.tracks.len(), 2);
+        assert!(!fresh.same_as(&cache));
+        assert_eq!(fresh.len(), 2);
+        assert!(result.tracks.iter().all(|track| track.artwork.is_none()));
+    }
+
+    #[test]
+    fn unchanged_library_leaves_the_cache_identical() {
+        let temp = TempDir::new();
+        write_wav(&temp.0.join("a.wav"));
+        let (_, first) = scan_folders(std::slice::from_ref(&temp.0), &LibraryCache::default());
+        let (again, second) = scan_folders(std::slice::from_ref(&temp.0), &first);
+        assert_eq!(again.tracks.len(), 1);
+        assert!(first.same_as(&second));
+    }
+
+    #[test]
+    fn covers_load_after_the_scan_and_are_shared_across_an_album() {
+        let temp = TempDir::new();
+        let art = encoded_artwork(64, 64);
+        let mut paths = Vec::new();
+        for name in ["one.wav", "two.wav", "none.wav"] {
+            let path = temp.0.join(name);
+            write_wav(&path);
+            if name != "none.wav" {
+                let picture = cover_picture(&art).unwrap();
+                write_discover_tags(&path, lofty::file::FileType::Wav, "T", "A", Some(picture))
+                    .unwrap();
+            }
+            paths.push(path);
+        }
+        let (scanned, _) = scan_folders(std::slice::from_ref(&temp.0), &LibraryCache::default());
+        assert!(scanned.tracks.iter().all(|track| track.artwork.is_none()));
+
+        let mut loader = CoverLoader::default();
+        let first = loader.load(&paths[..1]);
+        let rest = loader.load(&paths[1..]);
+        let (image_one, _) = first[0].as_ref().expect("cover loads");
+        let (image_two, _) = rest[0].as_ref().expect("cover loads in a later batch");
+        assert!(Arc::ptr_eq(image_one, image_two));
+        assert!(rest[1].is_none());
     }
 
     #[test]
