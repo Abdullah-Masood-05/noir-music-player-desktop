@@ -4,6 +4,30 @@ Release notes are scoped to the version in `Cargo.toml`. A section here does not
 
 ## [Unreleased]
 
+## [2.5.1]
+
+> [!CAUTION]
+> **Windows may stop Noir Player from running.** Noir Player isn't
+> code-signed, so SmartScreen or Smart App Control can block the installer,
+> and Windows Security can delete the app or the yt-dlp helper Discover needs.
+> If Windows says it blocked the app to protect you, Smart App Control is on:
+> open Windows Security → App & browser control → Smart App Control settings,
+> choose Off, then run the installer again. See
+> [If Windows blocks Noir Player](https://github.com/Abdullah-Masood-05/noir-music-player-desktop#if-windows-blocks-noir-player)
+> for every fix: getting past SmartScreen, turning off Smart App Control,
+> restoring a file Windows Security removed, and adding exclusions for Noir
+> Player's folders.
+
+Version 2.5.1 makes Noir Player open faster.
+
+### Improvements
+
+- **Faster Start**: Your library shows up as soon as the window opens. Noir
+  Player remembers your songs between launches and only re-reads the files
+  that changed. The first launch after updating builds this list once.
+- **Covers Load Behind the Scenes**: The song list no longer waits for every
+  cover. Covers fill in right after, starting with the songs at the top.
+
 ## [2.5.0]
 
 Version 2.5.0 finds and downloads Discover songs right on your computer.
