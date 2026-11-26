@@ -6,9 +6,10 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Downloads](https://img.shields.io/github/downloads/Abdullah-Masood-05/noir-music-player-desktop/total?color=brightgreen)](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/releases)
 [![Stars](https://img.shields.io/github/stars/Abdullah-Masood-05/noir-music-player-desktop?style=flat&logo=github&color=E53935)](https://github.com/Abdullah-Masood-05/noir-music-player-desktop/stargazers)
+[![Sponsor](https://img.shields.io/badge/sponsor-Polar-db61a2?logo=githubsponsors&logoColor=white)](https://buy.polar.sh/polar_cl_iccBChKQyqil3EgBBtV6qM3lfDpLk4sVu1OpK1j0jQ4)
 [![Build targets](https://img.shields.io/badge/build_targets-Windows%20%7C%20macOS%20%7C%20Linux-555)](#packaging-and-releases)
 
-> ⭐ **Enjoying Noir Player?** If it's useful to you, please [star it on GitHub](https://github.com/Abdullah-Masood-05/noir-music-player-desktop). It's free and it helps other people find it.
+> ⭐ **Enjoying Noir Player?** If it's useful to you, please [star it on GitHub](https://github.com/Abdullah-Masood-05/noir-music-player-desktop). It's free and it helps other people find it. To support its development, you can also [sponsor it on Polar](https://buy.polar.sh/polar_cl_iccBChKQyqil3EgBBtV6qM3lfDpLk4sVu1OpK1j0jQ4).
 
 This is the desktop version of [NoirPlayer for Android](https://github.com/Abdullah-Masood-05/noir-music-player-android), rebuilt in Rust with GPUI Kit. The window is laid out for a desktop: a navigation rail on the left, the song list in the middle, a queue you can dock on the right, and a transport bar along the bottom. It keeps the red-on-black look of the mobile app, has a light theme for daylight, and adds multi-folder library scanning, a 5-band graphic equalizer and Discover.
 
