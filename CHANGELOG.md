@@ -4,6 +4,34 @@ Release notes are scoped to the version in `Cargo.toml`. A section here does not
 
 ## [Unreleased]
 
+## [2.6.0]
+
+> [!CAUTION]
+> **Windows may stop Noir Player from running.** Noir Player isn't
+> code-signed, so SmartScreen or Smart App Control can block the installer,
+> and Windows Security can delete the app or the yt-dlp helper Discover needs.
+> If Windows says it blocked the app to protect you, Smart App Control is on:
+> open Windows Security → App & browser control → Smart App Control settings,
+> choose Off, then run the installer again. See
+> [If Windows blocks Noir Player](https://github.com/Abdullah-Masood-05/noir-music-player-desktop#if-windows-blocks-noir-player)
+> for every fix: getting past SmartScreen, turning off Smart App Control,
+> restoring a file Windows Security removed, and adding exclusions for Noir
+> Player's folders.
+
+Version 2.6.0 makes Discover search find the songs you mean.
+
+### Improvements
+
+- **Search Like YouTube Music**: Discover search now lists songs in the order
+  YouTube Music ranks them, so the popular song comes first. Searching
+  "enemy" puts Imagine Dragons at the top.
+- **Faster Play and Download From Search**: A song you pick from search plays
+  and downloads that exact song, without searching for it a second time.
+- **Song Covers in Search**: Search results show each song's cover, and
+  **Open on YouTube** takes you to the song.
+- Trending still comes from Last.fm, and search uses Last.fm when YouTube
+  Music can't be reached.
+
 ## [2.5.1]
 
 > [!CAUTION]
