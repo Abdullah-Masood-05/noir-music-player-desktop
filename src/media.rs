@@ -628,7 +628,6 @@ fn fetch_with_ytdlp(
             let _ = fs::remove_dir_all(&self.0);
         }
     }
-    let found = crate::ytdlp::find(&source.name, &source.artist, progress, cancel)?;
     let scratch = Scratch(folder.join(format!(
         ".noir-dl-{}-{}",
         std::process::id(),
@@ -640,7 +639,21 @@ fn fetch_with_ytdlp(
     fs::create_dir(&scratch.0).map_err(|_| {
         anyhow!("Could not create a temporary folder. Check free space and permissions.")
     })?;
-    let downloaded = crate::ytdlp::download(&found, &scratch.0, format, progress, cancel)?;
+    // A row from YouTube names its video; if that one fails, look the song up.
+    let named = source
+        .youtube_id()
+        .and_then(crate::ytdlp::Match::known)
+        .and_then(|found| {
+            crate::ytdlp::download(&found, &scratch.0, format, progress, cancel).ok()
+        });
+    let downloaded = match named {
+        Some(path) => path,
+        None => {
+            crate::api::check_cancel(cancel)?;
+            let found = crate::ytdlp::find(&source.name, &source.artist, progress, cancel)?;
+            crate::ytdlp::download(&found, &scratch.0, format, progress, cancel)?
+        }
+    };
     crate::api::check_cancel(cancel)?;
     let metadata = fs::metadata(&downloaded)
         .map_err(|_| anyhow!("The downloaded audio could not be read."))?;
@@ -3032,7 +3045,7 @@ mod tests {
         let source = crate::api::Track {
             name: "Numb".into(),
             artist: "Linkin Park".into(),
-            url: None,
+            ..Default::default()
         };
         let cancel = std::sync::atomic::AtomicBool::new(false);
         for (format, extension) in [(AudioFormat::Original, "m4a"), (AudioFormat::Mp3, "mp3")] {

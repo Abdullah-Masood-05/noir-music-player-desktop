@@ -627,6 +627,11 @@ fn update_ytdlp(dir: &Path) -> Result<()> {
 }
 
 /// The path of yt-dlp, downloading it first when this is the first use.
+/// Whether yt-dlp is already on this computer (nothing to download first).
+pub fn ytdlp_installed() -> bool {
+    tools_dir().is_ok_and(|dir| dir.join(Tool::YtDlp.file_name()).is_file())
+}
+
 pub fn ensure_ytdlp(progress: &dyn Fn(&str), cancel: &AtomicBool) -> Result<PathBuf> {
     let dir = tools_dir()?;
     create_tools_dir(&dir)?;

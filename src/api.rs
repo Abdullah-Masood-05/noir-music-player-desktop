@@ -5,11 +5,42 @@ use std::time::Duration;
 
 use crate::config::ApiKeys;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Track {
     pub name: String,
     pub artist: String,
+    /// The Last.fm page; `None` for songs found on YouTube.
     pub url: Option<String>,
+    /// The YouTube video a search result is; Play and Download use it as is.
+    pub video_id: Option<String>,
+    /// Cover for a YouTube result (`i.ytimg.com`, `lh3.googleusercontent.com`).
+    pub thumbnail: Option<String>,
+}
+
+impl Track {
+    /// A Discover row for a song found on YouTube.
+    pub fn from_song(song: crate::ytdlp::Song) -> Self {
+        Track {
+            name: song.title,
+            artist: song.artist,
+            url: None,
+            video_id: Some(song.id),
+            thumbnail: song.thumbnail,
+        }
+    }
+
+    /// The valid YouTube video id of this row, if it came from YouTube.
+    pub fn youtube_id(&self) -> Option<&str> {
+        self.video_id
+            .as_deref()
+            .filter(|id| crate::ytdlp::valid_video_id(id))
+    }
+
+    /// Where "Open on YouTube" goes.
+    pub fn youtube_url(&self) -> Option<String> {
+        self.youtube_id()
+            .map(|id| format!("https://music.youtube.com/watch?v={id}"))
+    }
 }
 
 pub fn fetch_trending(keys: &ApiKeys) -> Result<Vec<Track>> {
@@ -21,6 +52,21 @@ pub fn search_tracks(keys: &ApiKeys, query: &str) -> Result<Vec<Track>> {
         return fetch_trending(keys);
     }
     request(keys, Some(query.trim()))
+}
+
+/// A typed search ranked like YouTube Music, found with yt-dlp on this
+/// computer. When that is not ready or fails, Last.fm answers instead, so
+/// searching still works and only one error can ever be shown.
+pub fn search_ranked(keys: &ApiKeys, query: &str, cancel: &AtomicBool) -> Result<Vec<Track>> {
+    if crate::tools::ytdlp_installed() {
+        if let Ok(songs) = crate::ytdlp::search_songs(query, &|_| {}, cancel) {
+            if !songs.is_empty() {
+                return Ok(songs.into_iter().map(Track::from_song).collect());
+            }
+        }
+        check_cancel(cancel)?;
+    }
+    search_tracks(keys, query)
 }
 
 fn request(keys: &ApiKeys, query: Option<&str>) -> Result<Vec<Track>> {
@@ -102,6 +148,8 @@ fn parse_tracks(root: &Value, search: bool) -> Result<Vec<Track>> {
                     .and_then(Value::as_str)
                     .filter(|url| safe_track_url(url))
                     .map(str::to_owned),
+                video_id: None,
+                thumbnail: None,
             })
         })
         .collect()
@@ -213,7 +261,9 @@ pub fn safe_track_url(url: &str) -> bool {
 }
 
 /// The image CDNs the backend's `/api/art` answers with.
-const ART_HOSTS: [&str; 8] = [
+const ART_HOSTS: [&str; 10] = [
+    "i.ytimg.com",
+    "lh3.googleusercontent.com",
     "lastfm.freetls.fastly.net",
     "cdn-images.dzcdn.net",
     "e-cdns-images.dzcdn.net",
@@ -252,6 +302,9 @@ pub fn art_key(track: &Track) -> String {
 /// The cover art URL for a Discover song, or `None` when no service has one.
 /// Always asked of the backend: it combines services no key in Settings covers.
 pub fn fetch_art_url(track: &Track) -> Result<Option<String>> {
+    if track.youtube_id().is_some() {
+        return Ok(track.thumbnail.clone().filter(|url| safe_art_url(url)));
+    }
     let root = backend_json(
         &format!(
             "/api/art?artist={}&track={}",
@@ -280,6 +333,15 @@ pub fn fetch_art_bytes(url: &str) -> Result<Vec<u8>> {
 /// service offers within reason, falling back to the thumbnail itself.
 /// `None` when the song has no art or none of it could be fetched.
 pub fn fetch_cover_art(track: &Track) -> Option<Vec<u8>> {
+    if let Some(id) = track.youtube_id() {
+        let large = format!("https://i.ytimg.com/vi/{id}/hq720.jpg");
+        return [Some(large), track.thumbnail.clone()]
+            .into_iter()
+            .flatten()
+            .filter(|url| safe_art_url(url))
+            .find_map(|url| fetch_image(&url, MAX_COVER_BYTES).ok())
+            .and_then(|bytes| square_jpeg(&bytes));
+    }
     let url = fetch_art_url(track).ok()??;
     let large = large_art_url(&url);
     if large != url {
@@ -288,6 +350,24 @@ pub fn fetch_cover_art(track: &Track) -> Option<Vec<u8>> {
         }
     }
     fetch_image(&url, MAX_COVER_BYTES).ok()
+}
+
+/// The middle square of an image as a JPEG: YouTube frames are widescreen.
+pub fn square_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = image::load_from_memory(bytes).ok()?.to_rgb8();
+    let (width, height) = image.dimensions();
+    let side = width.min(height);
+    let cropped =
+        image::imageops::crop_imm(&image, (width - side) / 2, (height - side) / 2, side, side)
+            .to_image();
+    let mut out = Vec::new();
+    cropped
+        .write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .ok()?;
+    Some(out)
 }
 
 /// iTunes names the size in the file name (`.../200x200bb.jpg`) and serves
@@ -432,7 +512,7 @@ mod tests {
         let numb = Track {
             name: "Numb".into(),
             artist: "Linkin Park".into(),
-            url: None,
+            ..Default::default()
         };
         let art = fetch_art_url(&numb)
             .expect("art through the backend")
@@ -497,7 +577,7 @@ mod tests {
         let track = |artist: &str, name: &str| Track {
             name: name.into(),
             artist: artist.into(),
-            url: None,
+            ..Default::default()
         };
         assert_eq!(
             art_key(&track("Linkin Park", "Numb")),
@@ -552,5 +632,31 @@ mod tests {
             assert!(!safe_track_url(url));
         }
         assert!(safe_track_url("https://www.last.fm/music/Artist/_/Song"));
+    }
+
+    #[test]
+    fn youtube_rows_open_on_youtube_and_check_their_id() {
+        let mut row = Track {
+            name: "Enemy".into(),
+            artist: "Imagine Dragons".into(),
+            video_id: Some("vxa8ShIm9yw".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            row.youtube_url().as_deref(),
+            Some("https://music.youtube.com/watch?v=vxa8ShIm9yw")
+        );
+        row.video_id = Some("x y&z".into());
+        assert!(row.youtube_url().is_none() && row.youtube_id().is_none());
+        assert!(safe_art_url(
+            "https://i.ytimg.com/vi/vxa8ShIm9yw/mqdefault.jpg"
+        ));
+        assert!(safe_art_url(
+            "https://lh3.googleusercontent.com/abc=w226-h226"
+        ));
+        assert!(!safe_art_url(
+            "http://i.ytimg.com/vi/vxa8ShIm9yw/mqdefault.jpg"
+        ));
+        assert!(!safe_art_url("https://i.ytimg.com.evil.example/a.jpg"));
     }
 }

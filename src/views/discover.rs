@@ -109,17 +109,27 @@ pub fn render_discover(model: &mut NoirPlayerModel, cx: &mut Context<NoirPlayerM
                                 this.discover_audio(download.clone(), true, cx);
                             })),
                     )
-                    .when_some(track.url.clone(), |row, url| {
+                    .when_some(track.youtube_url(), |row, url| {
                         row.child(
                             Button::new(format!("discover-open-{i}"))
-                                .label("Open on Last.fm")
-                                .on_click(move |_, _, cx| {
-                                    if crate::api::safe_track_url(&url) {
-                                        cx.open_url(&url);
-                                    }
-                                }),
+                                .label("Open on YouTube")
+                                .on_click(move |_, _, cx| cx.open_url(&url)),
                         )
                     })
+                    .when_some(
+                        track.url.clone().filter(|_| track.youtube_id().is_none()),
+                        |row, url| {
+                            row.child(
+                                Button::new(format!("discover-open-{i}"))
+                                    .label("Open on Last.fm")
+                                    .on_click(move |_, _, cx| {
+                                        if crate::api::safe_track_url(&url) {
+                                            cx.open_url(&url);
+                                        }
+                                    }),
+                            )
+                        },
+                    )
             }))
             .into_any_element()
     };

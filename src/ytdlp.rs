@@ -739,6 +739,301 @@ pub fn find(
     Ok(found)
 }
 
+// ---- song search (Discover) ----
+
+/// How many songs a typed Discover search lists.
+const SONG_RESULTS: usize = 20;
+/// How many of the top songs get their artists looked up (one yt-dlp each,
+/// run side by side); YouTube Music's list itself names only the titles.
+const ENRICHED: usize = 12;
+const INFO_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// A song found by a Discover search, in YouTube's order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Song {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub duration: Option<f64>,
+    pub thumbnail: Option<String>,
+}
+
+/// Whether `id` is shaped like a YouTube video id.
+pub fn valid_video_id(id: &str) -> bool {
+    valid_id(id)
+}
+
+/// The channel name without the " - Topic" YouTube adds to auto-generated
+/// artist channels.
+fn clean_channel(name: &str) -> String {
+    let name = name.trim();
+    name.strip_suffix(" - Topic")
+        .unwrap_or(name)
+        .trim()
+        .to_owned()
+}
+
+fn str_field(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// A square thumbnail on an allowed host when the entry lists one, otherwise
+/// YouTube's standard frame (cropped to a square when drawn).
+fn thumbnail_for(v: &Value, id: &str) -> String {
+    v.get("thumbnails")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|t| {
+            let side = |k: &str| t.get(k).and_then(Value::as_u64);
+            side("width").is_some() && side("width") == side("height")
+        })
+        .filter_map(|t| t.get("url").and_then(Value::as_str))
+        .find(|url| crate::api::safe_art_url(url))
+        .map_or_else(
+            || format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"),
+            str::to_owned,
+        )
+}
+
+/// Title and artist for a plain YouTube upload such as
+/// "Artist - Song (Official Video)" from the channel `channel`.
+fn clean_video_title(title: &str, channel: &str) -> (String, String) {
+    let channel = clean_channel(channel);
+    let mut song = title.trim().to_owned();
+    let mut artist = channel.clone();
+    if let Some((left, right)) = title.split_once(" - ") {
+        let (left, right) = (left.trim(), right.trim());
+        if !left.is_empty() && !right.is_empty() {
+            let channel_words = words(&channel);
+            let in_part = |part: &str| {
+                let part = words(part);
+                !channel_words.is_empty() && channel_words.iter().all(|w| part.contains(w))
+            };
+            // "Song - Artist" uploads name the channel on the right.
+            if in_part(right) && !in_part(left) {
+                (song, artist) = (left.to_owned(), right.to_owned());
+            } else {
+                (song, artist) = (right.to_owned(), left.to_owned());
+            }
+        }
+    }
+    (strip_title_noise(&song), artist)
+}
+
+/// Drops trailing "(Official Video)", "[Lyrics]", "| Official Audio" and the like.
+fn strip_title_noise(title: &str) -> String {
+    const NOISE: [&str; 8] = [
+        "official",
+        "lyric",
+        "audio",
+        "video",
+        "visualizer",
+        "4k",
+        "hd",
+        "mv",
+    ];
+    fn strip_brackets<'a>(mut title: &'a str, noise: &[&str]) -> &'a str {
+        loop {
+            let trimmed = title.trim_end();
+            let open = if trimmed.ends_with(')') {
+                '('
+            } else if trimmed.ends_with(']') {
+                '['
+            } else {
+                return trimmed;
+            };
+            let Some(start) = trimmed.rfind(open) else {
+                return trimmed;
+            };
+            let inner = trimmed[start + 1..trimmed.len() - 1].to_lowercase();
+            if start > 0 && noise.iter().any(|n| inner.contains(n)) {
+                title = trimmed[..start].trim_end();
+            } else {
+                return trimmed;
+            }
+        }
+    }
+    let title = title.trim();
+    if let Some((head, tail)) = title.split_once(" | ") {
+        let stripped = strip_brackets(head, &NOISE);
+        if stripped.len() != head.trim_end().len()
+            || NOISE.iter().any(|n| tail.to_lowercase().contains(n))
+        {
+            return strip_brackets(head.trim(), &NOISE).to_owned();
+        }
+    }
+    strip_brackets(title, &NOISE).to_owned()
+}
+
+/// One song from a yt-dlp entry: a full video record (YouTube Music songs
+/// carry `artists`) or a flat search entry (only a channel). `plain` marks
+/// ordinary YouTube results whose titles need cleaning.
+fn song_from_value(v: &Value, plain: bool) -> Option<Song> {
+    let id = v.get("id")?.as_str()?;
+    if !valid_id(id) {
+        return None;
+    }
+    let title = str_field(v, "title")?;
+    let listed: Vec<String> = v
+        .get("artists")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .take(2)
+        .map(str::to_owned)
+        .collect();
+    let channel = str_field(v, "channel")
+        .or_else(|| str_field(v, "uploader"))
+        .unwrap_or_default();
+    let (title, artist) = if !listed.is_empty() {
+        (title, listed.join(", "))
+    } else if let Some(artist) = str_field(v, "artist") {
+        (title, artist)
+    } else if plain {
+        clean_video_title(&title, &channel)
+    } else {
+        (title, clean_channel(&channel))
+    };
+    if artist.is_empty() || title.is_empty() {
+        return None;
+    }
+    Some(Song {
+        id: id.to_owned(),
+        title,
+        artist,
+        duration: v.get("duration").and_then(Value::as_f64),
+        thumbnail: Some(thumbnail_for(v, id)),
+    })
+}
+
+fn root_value(json: &str) -> Result<Value> {
+    let start = json.find('{').ok_or_else(|| anyhow!("no search results"))?;
+    serde_json::from_str(&json[start..]).map_err(|_| anyhow!("unreadable search results"))
+}
+
+/// Songs from a flat search listing, in order, without repeats.
+fn parse_songs(json: &str, plain: bool) -> Result<Vec<Song>> {
+    let root = root_value(json)?;
+    let entries = root
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("no search results"))?;
+    let mut songs: Vec<Song> = Vec::new();
+    for song in entries.iter().filter_map(|e| song_from_value(e, plain)) {
+        if !songs.iter().any(|s| s.id == song.id) {
+            songs.push(song);
+        }
+    }
+    Ok(songs)
+}
+
+/// Details of one video (a YouTube Music song).
+fn fetch_song(exe: &Path, id: &str, cancel: &AtomicBool) -> Result<Song> {
+    let mut args = base_args(None)?;
+    args.extend(["--skip-download", "-J"].map(String::from));
+    args.push(format!("https://music.youtube.com/watch?v={id}"));
+    let result = run(exe, &args, INFO_TIMEOUT, cancel, &mut |_| Line::Keep)?;
+    if !result.success {
+        bail!("{}", friendly_error(&result.stderr));
+    }
+    song_from_value(&root_value(&result.stdout)?, false).ok_or_else(|| anyhow!("no song details"))
+}
+
+/// The YouTube Music songs for `query` with artists filled in, best first.
+fn music_songs(exe: &Path, query: &str, cancel: &AtomicBool) -> Result<Vec<Song>> {
+    let target = format!(
+        "https://music.youtube.com/search?q={}#songs",
+        urlencoding::encode(query)
+    );
+    let ids: Vec<String> = search(exe, &target, cancel, &format!("1:{SONG_RESULTS}"))?
+        .into_iter()
+        .map(|e| e.id)
+        .take(ENRICHED)
+        .collect();
+    let mut found: Vec<Option<Song>> = vec![None; ids.len()];
+    std::thread::scope(|scope| {
+        for (slot, id) in found.iter_mut().zip(&ids) {
+            scope.spawn(move || *slot = fetch_song(exe, id, cancel).ok());
+        }
+    });
+    crate::api::check_cancel(cancel)?;
+    Ok(found.into_iter().flatten().collect())
+}
+
+fn wide_songs(exe: &Path, query: &str, cancel: &AtomicBool) -> Result<Vec<Song>> {
+    let target = format!("ytsearch{SONG_RESULTS}:{query}");
+    let mut args = base_args(None)?;
+    args.extend(["--flat-playlist", "-J", target.as_str()].map(String::from));
+    let result = run(exe, &args, SEARCH_TIMEOUT, cancel, &mut |_| Line::Keep)?;
+    if !result.success {
+        bail!("{}", friendly_error(&result.stderr));
+    }
+    parse_songs(&result.stdout, true)
+}
+
+/// YouTube Music's songs when it has any, otherwise ordinary YouTube results.
+fn songs_or_fallback(
+    music: impl FnOnce() -> Result<Vec<Song>>,
+    wide: impl FnOnce() -> Result<Vec<Song>>,
+) -> Result<Vec<Song>> {
+    let first_error = match music() {
+        Ok(songs) if !songs.is_empty() => return Ok(songs),
+        Ok(_) => None,
+        Err(error) => Some(error),
+    };
+    match wide() {
+        Ok(songs) if songs.is_empty() => first_error.map_or(Ok(songs), Err),
+        Ok(songs) => Ok(songs),
+        Err(error) => Err(first_error.unwrap_or(error)),
+    }
+}
+
+/// Ranked songs for a typed search, in the order YouTube lists them.
+pub fn search_songs(
+    query: &str,
+    progress: &dyn Fn(&str),
+    cancel: &AtomicBool,
+) -> Result<Vec<Song>> {
+    crate::api::check_cancel(cancel)?;
+    let query = query.trim();
+    if query.is_empty() {
+        bail!("Nothing to search for.");
+    }
+    let exe = tools::ensure_ytdlp(progress, cancel)?;
+    songs_or_fallback(
+        || music_songs(&exe, query, cancel),
+        || {
+            crate::api::check_cancel(cancel)?;
+            wide_songs(&exe, query, cancel)
+        },
+    )
+}
+
+impl Match {
+    /// The video a Discover row already names, with nothing else to try and
+    /// no artist check (the search chose it).
+    pub fn known(video_id: &str) -> Option<Match> {
+        valid_id(video_id).then(|| Match {
+            video_id: video_id.to_owned(),
+            title: String::new(),
+            artist: None,
+            duration: None,
+            alternatives: Vec::new(),
+            fallback_pending: false,
+            query: (String::new(), String::new()),
+            key: (format!("id:{video_id}"), String::new()),
+        })
+    }
+}
+
 // ---- download ----
 
 /// (downloaded, total) from a `PROG` line of the progress template.
@@ -1384,5 +1679,135 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    // Trimmed from `yt-dlp -J --skip-download` of a YouTube Music song.
+    const SONG_INFO: &str = r#"{"id":"vxa8ShIm9yw","title":"Enemy (From the series Arcane League of Legends)","artists":["Imagine Dragons","Arcane","League Of Legends"],"channel":"ImagineDragons","uploader":"ImagineDragons","duration":173,"thumbnails":[{"url":"https://i.ytimg.com/vi/vxa8ShIm9yw/3.jpg"},{"url":"https://i.ytimg.com/vi/vxa8ShIm9yw/hq720.jpg","width":1280,"height":720}]}"#;
+
+    // Trimmed from `yt-dlp --flat-playlist -J ytsearch20:enemy`.
+    const FLAT_SEARCH: &str = r#"{"entries":[
+        {"id":"rwI_7tDAbUU","title":"Imagine Dragons & JID - Enemy (Lyrics)","duration":171,"channel":"Taj Tracks","uploader":"Taj Tracks","thumbnails":[{"url":"https://i.ytimg.com/vi/rwI_7tDAbUU/hq720.jpg","width":360,"height":202}]},
+        {"id":"abcdefghijk","title":"Enemy - Tommee Profitt","duration":190,"channel":"Tommee Profitt - Topic"},
+        {"id":"rwI_7tDAbUU","title":"Imagine Dragons & JID - Enemy (Lyrics)","channel":"Taj Tracks"},
+        {"id":"bad id","title":"Nope","channel":"X"},
+        {"id":"zzzzzzzzzzz","channel":"No title"}
+    ]}"#;
+
+    #[test]
+    fn music_song_details_are_parsed() {
+        let song = song_from_value(&root_value(SONG_INFO).unwrap(), false).unwrap();
+        assert_eq!(song.id, "vxa8ShIm9yw");
+        assert_eq!(
+            song.title,
+            "Enemy (From the series Arcane League of Legends)"
+        );
+        assert_eq!(song.artist, "Imagine Dragons, Arcane");
+        assert_eq!(song.duration, Some(173.0));
+        assert_eq!(
+            song.thumbnail.as_deref(),
+            Some("https://i.ytimg.com/vi/vxa8ShIm9yw/mqdefault.jpg")
+        );
+    }
+
+    #[test]
+    fn flat_results_keep_order_clean_titles_and_drop_junk() {
+        let songs = parse_songs(FLAT_SEARCH, true).unwrap();
+        let ids: Vec<&str> = songs.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["rwI_7tDAbUU", "abcdefghijk"]);
+        assert_eq!(songs[0].title, "Enemy");
+        assert_eq!(songs[0].artist, "Imagine Dragons & JID");
+        assert_eq!(songs[1].title, "Enemy");
+        assert_eq!(songs[1].artist, "Tommee Profitt");
+        assert!(parse_songs("{\"id\":\"x\"}", true).is_err());
+    }
+
+    #[test]
+    fn topic_suffix_is_removed_from_channels() {
+        assert_eq!(clean_channel("Joeboy - Topic"), "Joeboy");
+        assert_eq!(clean_channel("  Queen "), "Queen");
+        assert_eq!(clean_channel("Topic"), "Topic");
+        let flat =
+            serde_json::json!({"id":"abcdefghijk","title":"Halo","channel":"Beyonce - Topic"});
+        assert_eq!(song_from_value(&flat, false).unwrap().artist, "Beyonce");
+    }
+
+    #[test]
+    fn video_titles_are_cleaned_sensibly() {
+        let clean = |t, c| clean_video_title(t, c);
+        assert_eq!(
+            clean(
+                "Queen - Bohemian Rhapsody (Official Video Remastered)",
+                "Queen Official"
+            ),
+            ("Bohemian Rhapsody".into(), "Queen".into())
+        );
+        assert_eq!(
+            clean(
+                "Numb [Official Music Video] [4K UPGRADE] | Linkin Park",
+                "Linkin Park"
+            ),
+            ("Numb".into(), "Linkin Park".into())
+        );
+        // Left alone when there is nothing to go on.
+        assert_eq!(
+            clean("Song (Live at Wembley)", "Some Channel"),
+            ("Song (Live at Wembley)".into(), "Some Channel".into())
+        );
+        assert_eq!(strip_title_noise("(Official Video)"), "(Official Video)");
+    }
+
+    #[test]
+    fn video_ids_are_validated() {
+        assert!(valid_video_id("vxa8ShIm9yw"));
+        assert!(valid_video_id("rwI_7tDAbUU"));
+        assert!(valid_video_id("-_-_-_-_-_-"));
+        assert!(!valid_video_id(""));
+        assert!(!valid_video_id("short"));
+        assert!(!valid_video_id("vxa8ShIm9yw1"));
+        assert!(!valid_video_id("vxa8ShIm9y&"));
+        assert!(!valid_video_id("--output=abc"));
+        assert!(Match::known("vxa8ShIm9yw").is_some());
+        assert!(Match::known("--exec=calc").is_none());
+    }
+
+    #[test]
+    fn plain_youtube_results_are_used_only_when_music_has_none() {
+        let song = |id: &str| Song {
+            id: id.into(),
+            title: "t".into(),
+            artist: "a".into(),
+            duration: None,
+            thumbnail: None,
+        };
+        let wide_unused = || -> Result<Vec<Song>> { panic!("music results are enough") };
+        let found = songs_or_fallback(|| Ok(vec![song("music")]), wide_unused).unwrap();
+        assert_eq!(found[0].id, "music");
+        let found = songs_or_fallback(|| Ok(vec![]), || Ok(vec![song("wide")])).unwrap();
+        assert_eq!(found[0].id, "wide");
+        let found = songs_or_fallback(|| Err(anyhow!("music failed")), || Ok(vec![song("wide")]));
+        assert_eq!(found.unwrap()[0].id, "wide");
+        let both = songs_or_fallback(
+            || Err(anyhow!("music failed")),
+            || Err(anyhow!("wide failed")),
+        );
+        assert_eq!(both.unwrap_err().to_string(), "music failed");
+        assert!(songs_or_fallback(|| Ok(vec![]), || Ok(vec![]))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    #[ignore = "uses the network and YouTube"]
+    fn live_search_ranks_the_popular_song_first() {
+        let started = Instant::now();
+        let songs = search_songs("enemy", &|_| {}, &AtomicBool::new(false)).unwrap();
+        for (i, song) in songs.iter().enumerate() {
+            println!("{}. {} | {} | {}", i + 1, song.title, song.artist, song.id);
+        }
+        println!("took {:?}", started.elapsed());
+        assert!(songs
+            .iter()
+            .take(5)
+            .any(|s| s.artist.contains("Imagine Dragons")));
     }
 }

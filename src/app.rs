@@ -291,6 +291,8 @@ pub struct NoirPlayerModel {
     pub discover_loading: bool,
     pub discover_error: Option<String>,
     pub discover_request: u64,
+    /// Stops the previous search's yt-dlp runs once a newer search starts.
+    discover_search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub discover_audio_status: Option<String>,
     pub discover_audio_error: Option<String>,
     discover_audio_request: u64,
@@ -459,6 +461,7 @@ impl NoirPlayerModel {
             discover_loading: false,
             discover_error: None,
             discover_request: 0,
+            discover_search_cancel: Default::default(),
             discover_audio_status: None,
             discover_audio_error: None,
             discover_audio_request: 0,
@@ -528,6 +531,10 @@ impl NoirPlayerModel {
         self.discover_art.hold();
         let query = query.trim().to_owned();
         let keys = crate::config::ApiKeys::from_store(&self.store);
+        self.discover_search_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.discover_search_cancel = cancel.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -535,7 +542,7 @@ impl NoirPlayerModel {
                     if query.is_empty() {
                         crate::api::fetch_trending(&keys)
                     } else {
-                        crate::api::search_tracks(&keys, &query)
+                        crate::api::search_ranked(&keys, &query, &cancel)
                     }
                 })
                 .await;
@@ -2529,7 +2536,11 @@ fn load_discover_art(track: &crate::api::Track) -> Result<Option<std::sync::Arc<
     let Some(url) = crate::api::fetch_art_url(track).map_err(|_| ())? else {
         return Ok(None);
     };
-    let bytes = crate::api::fetch_art_bytes(&url).map_err(|_| ())?;
+    let mut bytes = crate::api::fetch_art_bytes(&url).map_err(|_| ())?;
+    if track.youtube_id().is_some() {
+        // YouTube's frames are widescreen; Discover draws squares.
+        bytes = crate::api::square_jpeg(&bytes).ok_or(())?;
+    }
     Ok(crate::media::discover_thumb(&bytes))
 }
 

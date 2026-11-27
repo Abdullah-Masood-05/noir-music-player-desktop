@@ -175,7 +175,7 @@ mod tests {
         Track {
             name: name.into(),
             artist: "Artist".into(),
-            url: None,
+            ..Default::default()
         }
     }
 
