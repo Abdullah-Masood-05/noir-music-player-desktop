@@ -4,6 +4,30 @@ Release notes are scoped to the version in `Cargo.toml`. A section here does not
 
 ## [Unreleased]
 
+## [2.6.1]
+
+> [!CAUTION]
+> **Windows may stop Noir Player from running.** Noir Player isn't
+> code-signed, so SmartScreen or Smart App Control can block the installer,
+> and Windows Security can delete the app or the yt-dlp helper Discover needs.
+> If Windows says it blocked the app to protect you, Smart App Control is on:
+> open Windows Security → App & browser control → Smart App Control settings,
+> choose Off, then run the installer again. See
+> [If Windows blocks Noir Player](https://github.com/Abdullah-Masood-05/noir-music-player-desktop#if-windows-blocks-noir-player)
+> for every fix: getting past SmartScreen, turning off Smart App Control,
+> restoring a file Windows Security removed, and adding exclusions for Noir
+> Player's folders.
+
+Version 2.6.1 fixes clearing a Discover search.
+
+### Fixes
+
+- **Clearing Search Shows Trending Again**: Pressing ✕ in the Discover search
+  box, or deleting the text, brings back the trending songs, as when you first
+  open Discover. Before, the old search results stayed on screen.
+- The message shown while searching no longer mentions Last.fm, since search
+  now uses YouTube Music.
+
 ## [2.6.0]
 
 > [!CAUTION]
