@@ -364,6 +364,15 @@ pub fn fetch_cover_art(track: &Track) -> Option<Vec<u8>> {
 
 /// The middle square of an image as a JPEG: YouTube frames are widescreen.
 pub fn square_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (claimed_width, claimed_height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    // A small file can still claim enormous dimensions.
+    if claimed_width.max(claimed_height) > 4096 {
+        return None;
+    }
     let image = image::load_from_memory(bytes).ok()?.to_rgb8();
     let (width, height) = image.dimensions();
     let side = width.min(height);
