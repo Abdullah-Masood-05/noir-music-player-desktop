@@ -18,7 +18,7 @@ pub fn render_discover(model: &mut NoirPlayerModel, cx: &mut Context<NoirPlayerM
         div()
             .p_4()
             .text_color(dynamic_subtitle(is_light))
-            .child("Searching Last.fm...")
+            .child("Searching...")
             .into_any_element()
     } else if let Some(error) = &model.discover_error {
         div()

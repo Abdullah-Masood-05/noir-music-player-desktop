@@ -293,6 +293,8 @@ pub struct NoirPlayerModel {
     pub discover_request: u64,
     /// Stops the previous search's yt-dlp runs once a newer search starts.
     discover_search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The search the Discover list was last loaded for; empty for Trending.
+    discover_query: String,
     pub discover_audio_status: Option<String>,
     pub discover_audio_error: Option<String>,
     discover_audio_request: u64,
@@ -412,8 +414,19 @@ impl NoirPlayerModel {
             }),
             cx.subscribe(&library_search, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&discover_search, |this, input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.load_discover(input.read(cx).value().to_string(), cx);
+                match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.load_discover(input.read(cx).value().to_string(), cx);
+                    }
+                    // Clearing the box (its ✕ or deleting the text) goes back
+                    // to Trending, as when Discover first opens.
+                    InputEvent::Change
+                        if input.read(cx).value().trim().is_empty()
+                            && !this.discover_query.is_empty() =>
+                    {
+                        this.load_discover(String::new(), cx);
+                    }
+                    _ => {}
                 }
             }),
             cx.subscribe(&settings_search, |_, _, _: &InputEvent, cx| cx.notify()),
@@ -462,6 +475,7 @@ impl NoirPlayerModel {
             discover_error: None,
             discover_request: 0,
             discover_search_cancel: Default::default(),
+            discover_query: String::new(),
             discover_audio_status: None,
             discover_audio_error: None,
             discover_audio_request: 0,
@@ -530,6 +544,7 @@ impl NoirPlayerModel {
         self.discover_tracks.clear();
         self.discover_art.hold();
         let query = query.trim().to_owned();
+        self.discover_query = query.clone();
         let keys = crate::config::ApiKeys::from_store(&self.store);
         self.discover_search_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
