@@ -14,6 +14,7 @@ pub mod update;
 mod views;
 mod widgets;
 mod ytdlp;
+mod ytmusic;
 
 use gpui_kit::component::Root;
 use gpui_kit::*;

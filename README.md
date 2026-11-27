@@ -121,10 +121,9 @@ Switch themes inside **Settings** (`Ctrl+,`), which also manages library scan fo
 Discover needs nothing to be set up.
 
 - **Charts** come from Last.fm through Noir Player's server
-  (`https://noir-player-api.vercel.app`). **Search** uses YouTube Music on your
-  computer, so results are ranked the way YouTube ranks them; if that is not
-  available yet (it needs the downloader below, which is fetched the first time
-  you play or download a song) or fails, search falls back to Last.fm. Settings → Discover also takes your
+  (`https://noir-player-api.vercel.app`). **Search** asks YouTube Music directly from your computer, so
+  results are ranked the way YouTube Music ranks them; if it can't be reached
+  or has no songs, search falls back to Last.fm. Settings → Discover also takes your
   own Last.fm key, which calls Last.fm directly on your own quota. For
   development, `LASTFM_API_KEY` in the environment or in a `.env` found from
   the working directory (see `.env.example`) does the same. `NOIR_API_BASE`

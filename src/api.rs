@@ -19,7 +19,7 @@ pub struct Track {
 
 impl Track {
     /// A Discover row for a song found on YouTube.
-    pub fn from_song(song: crate::ytdlp::Song) -> Self {
+    pub fn from_song(song: crate::ytmusic::Song) -> Self {
         Track {
             name: song.title,
             artist: song.artist,
@@ -54,18 +54,16 @@ pub fn search_tracks(keys: &ApiKeys, query: &str) -> Result<Vec<Track>> {
     request(keys, Some(query.trim()))
 }
 
-/// A typed search ranked like YouTube Music, found with yt-dlp on this
-/// computer. When that is not ready or fails, Last.fm answers instead, so
-/// searching still works and only one error can ever be shown.
+/// A typed search ranked like YouTube Music. When YouTube Music fails or has
+/// no songs, Last.fm answers instead, so searching still works and only one
+/// error can ever be shown.
 pub fn search_ranked(keys: &ApiKeys, query: &str, cancel: &AtomicBool) -> Result<Vec<Track>> {
-    if crate::tools::ytdlp_installed() {
-        if let Ok(songs) = crate::ytdlp::search_songs(query, &|_| {}, cancel) {
-            if !songs.is_empty() {
-                return Ok(songs.into_iter().map(Track::from_song).collect());
-            }
+    if let Ok(songs) = crate::ytmusic::search(query, cancel) {
+        if !songs.is_empty() {
+            return Ok(songs.into_iter().map(Track::from_song).collect());
         }
-        check_cancel(cancel)?;
     }
+    check_cancel(cancel)?;
     search_tracks(keys, query)
 }
 
@@ -261,9 +259,10 @@ pub fn safe_track_url(url: &str) -> bool {
 }
 
 /// The image CDNs the backend's `/api/art` answers with.
-const ART_HOSTS: [&str; 10] = [
+const ART_HOSTS: [&str; 11] = [
     "i.ytimg.com",
     "lh3.googleusercontent.com",
+    "yt3.googleusercontent.com",
     "lastfm.freetls.fastly.net",
     "cdn-images.dzcdn.net",
     "e-cdns-images.dzcdn.net",
@@ -334,8 +333,19 @@ pub fn fetch_art_bytes(url: &str) -> Result<Vec<u8>> {
 /// `None` when the song has no art or none of it could be fetched.
 pub fn fetch_cover_art(track: &Track) -> Option<Vec<u8>> {
     if let Some(id) = track.youtube_id() {
-        let large = format!("https://i.ytimg.com/vi/{id}/hq720.jpg");
-        return [Some(large), track.thumbnail.clone()]
+        // A Google-hosted cover is already square and large; a video frame
+        // is the larger widescreen one, cropped below.
+        let frame = format!("https://i.ytimg.com/vi/{id}/hq720.jpg");
+        let cover = track.thumbnail.clone();
+        let candidates = if cover
+            .as_deref()
+            .is_some_and(|u| u.contains("googleusercontent.com/"))
+        {
+            [cover, Some(frame)]
+        } else {
+            [Some(frame), cover]
+        };
+        return candidates
             .into_iter()
             .flatten()
             .filter(|url| safe_art_url(url))
